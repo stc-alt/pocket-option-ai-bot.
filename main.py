@@ -1,33 +1,39 @@
+from fastapi import FastAPI, Request
 import os
-import requests
-import pandas as pd
-import numpy as np
-from fastapi import FastAPI, BackgroundTasks
-import uvicorn
-from sklearn.ensemble import RandomForestClassifier
+import httpx
 
 app = FastAPI()
 
-# Fetch parameters directly from your secure cloud environment
+# Automatically pulls your secret keys from your Render Environment tab
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-def send_alert(msg):
-    if TOKEN and CHAT_ID:
-        url = f"https://telegram.org{TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"})
-
 @app.get("/")
 def home():
+    # This keeps your browser status working perfectly
     return {"status": "AI Core Active"}
 
-@app.get("/tick/{symbol}/{open_p}/{high_p}/{low_p}/{close_p}")
-def process_tick(symbol: str, open_p: float, high_p: float, low_p: float, close_p: float):
-    """Processes live incoming candle ticks and tracks them natively"""
-    # Simply mapping structural logic into readable strings for execution
-    msg = f"⚡ *AI SIGNAL UPDATE*\nAsset: {symbol}\nPrice: {close_p}\nStatus: Analyzing Flow..."
-    send_alert(msg)
-    return {"processed": True}
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+@app.post("/")
+async def receive_telegram_message(request: Request):
+    try:
+        # 1. Listen to the data payload coming from Telegram
+        data = await request.json()
+        
+        # 2. Check if a text message was sent to the bot
+        if "message" in data and "text" in data["message"]:
+            incoming_text = data["message"]["text"]
+            
+            # 3. Format the message for your channel
+            alert_text = f"🤖 Bot Signal Received:\n{incoming_text}"
+            
+            # 4. Push the message directly into your Telegram Channel
+            telegram_url = f"https://telegram.org{TOKEN}/sendMessage"
+            payload = {"chat_id": CHAT_ID, "text": alert_text}
+            
+            async with httpx.AsyncClient() as client:
+                await client.post(telegram_url, json=payload)
+                
+    except Exception as e:
+        print(f"Error handling message: {e}")
+        
+    return {"status": "success"}
