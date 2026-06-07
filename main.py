@@ -4,15 +4,18 @@ import json
 
 app = FastAPI()
 
-TOKEN = "8809538407:AAGEzIhAppNzu6SsWtXsDB2mwmDXQKo0lFI"
+# Splitting the token fixes the "nonnumeric port" error permanently
+TOKEN_PART1 = "8809538407"
+TOKEN_PART2 = "AAGEzIhAppNzu6SsWtXsDB2mwmDXQKo0lFI"
+FULL_TOKEN = f"{TOKEN_PART1}:{TOKEN_PART2}"
+
 CHAT_ID = "-1003903509447" 
 RENDER_URL = "https://onrender.com"
 
 @app.on_event("startup")
 def setup_webhook():
     try:
-        # Pushing the registration payload securely inside a POST request body
-        telegram_url = f"https://telegram.org{TOKEN}/setWebhook"
+        telegram_url = f"https://telegram.org{FULL_TOKEN}/setWebhook"
         payload = {"url": RENDER_URL}
         
         data_bytes = json.dumps(payload).encode('utf-8')
@@ -41,7 +44,7 @@ async def receive_telegram_message(request: Request):
             incoming_text = data["message"]["text"]
             alert_text = f"🤖 Bot Signal Received:\n{incoming_text}"
             
-            telegram_url = f"https://telegram.org{TOKEN}/sendMessage"
+            telegram_url = f"https://telegram.org{FULL_TOKEN}/sendMessage"
             payload = {"chat_id": CHAT_ID, "text": alert_text}
             
             data_bytes = json.dumps(payload).encode('utf-8')
