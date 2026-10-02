@@ -1,0 +1,11 @@
+{
+  "name": "AI Forex Signal Bot",
+  "short_name": "Forex Bot",
+  "description": "AI Forex Signal Bot Dashboard",
+  "start_url": "/app",
+  "display": "standalone",
+  "background_color": "#080c17",
+  "theme_color": "#0b1020",
+  "orientation": "portrait",
+  "icons": []
+}
