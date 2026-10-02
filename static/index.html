@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+
+    <meta name="theme-color" content="#0b1020">
+    <meta name="description"
+          content="AI Forex Signal Bot dashboard">
+
+    <link rel="manifest" href="/manifest.json">
+
+    <title>AI Forex Bot</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            background: #080c17;
+            color: #ffffff;
+            min-height: 100vh;
+        }
+
+        .app {
+            max-width: 1100px;
+            margin: auto;
+            padding: 20px;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 25px;
+        }
+
+        .logo {
+            font-size: 24px;
+            font-weight: bold;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            background: #11182a;
+            padding: 8px 12px;
+            border-radius: 20px;
+            font-size: 13px;
+        }
+
+        .dot {
+            width: 9px;
+            height: 9px;
+            background: #22c55e;
+            border-radius: 50%;
+        }
+
+        .hero {
+            background: linear-gradient(135deg, #111a35, #151027);
+            border-radius: 20px;
+            padding: 24px;
+            margin-bottom: 20px;
+        }
+
+        .hero h1 {
+            font-size: 28px;
+            margin-bottom: 8px;
+        }
+
+        .hero p {
+            color: #9ca3af;
+        }
+
+        .session {
+            margin-top: 18px;
+            display: inline-block;
+            padding: 8px 14px;
+            background: #18223c;
+            border-radius: 20px;
+            color: #60a5fa;
+            font-size: 14px;
+        }
+
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 14px;
+            margin-bottom: 20px;
+        }
+
+        .card {
+            background: #111827;
+            border: 1px solid #1f2937;
+            border-radius: 16px;
+            padding: 18px;
+        }
+
+        .card-title {
+            color: #9ca3af;
+            font-size: 13px;
+            margin-bottom: 9px;
+        }
+
+        .card-value {
+            font-size: 27px;
+            font-weight: bold;
+        }
+
+        .green {
+            color: #22c55e;
+        }
+
+        .red {
+            color: #ef4444;
+        }
+
+        .yellow {
+            color: #facc15;
+        }
+
+        .blue {
+            color: #60a5fa;
+        }
+
+        .section {
+            background: #111827;
+            border: 1px solid #1f2937;
+            border-radius: 18px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .section h2 {
+            margin-bottom: 15px;
+            font-size: 19px;
+        }
+
+        .pairs {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+
+        .pair {
+            background: #0b1220;
+            border-radius: 15px;
+            padding: 18px;
+            border: 1px solid #1f2937;
+        }
+
+        .pair-top {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 15px;
+        }
+
+        .pair-name {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .pair-status {
+            color: #22c55e;
+            font-size: 12px;
+        }
+
+        .pair-data {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .data-label {
+            color: #6b7280;
+            font-size: 12px;
+        }
+
+        .data-value {
+            margin-top: 4px;
+            font-size: 15px;
+        }
+
+        .signal-box {
+            margin-top: 15px;
+            padding: 13px;
+            border-radius: 12px;
+            background: #111827;
+            text-align: center;
+            font-weight: bold;
+        }
+
+        .no-signal {
+            color: #9ca3af;
+        }
+
+        .table-container {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 750px;
+        }
+
+        th,
+        td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #1f2937;
+            font-size: 13px;
+        }
+
+        th {
+            color: #9ca3af;
+            font-weight: normal;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 5px 9px;
+            border-radius: 8px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+
+        .call {
+            background: rgba(34, 197, 94, 0.15);
+            color: #22c55e;
+        }
+
+        .put {
+            background: rgba(239, 68, 68, 0.15);
+            color: #ef4444;
+        }
+
+        .pending {
+            background: rgba(250, 204, 21, 0.15);
+            color: #facc15;
+        }
+
+        .win {
+            background: rgba(34, 197, 94, 0.15);
+            color: #22c55e;
+        }
+
+        .loss {
+            background: rgba(239, 68, 68, 0.15);
+            color: #ef4444;
+        }
+
+        .draw {
+            background: rgba(156, 163, 175, 0.15);
+            color: #9ca3af;
+        }
+
+        .footer {
+            text-align: center;
+            color: #6b7280;
+            font-size: 12px;
+            padding: 15px;
+        }
+
+        .refresh {
+            color: #6b7280;
+            font-size: 12px;
+            margin-top: 8px;
+        }
+
+        @media (max-width: 800px) {
+            .cards {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .pairs {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .app {
+                padding: 12px;
+            }
+
+            .hero h1 {
+                font-size: 23px;
+            }
+
+            .cards {
+                gap: 8px;
+            }
+
+            .card {
+                padding: 14px;
+            }
+
+            .card-value {
+                font-size: 22px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="app">
+
+    <header>
+        <div class="logo">🤖 AI Forex Bot</div>
+
+        <div class="status">
+            <span class="dot"></span>
+            <span id="botStatus">Checking...</span>
+        </div>
+    </header>
+
+    <div class="hero">
+
+        <h1>Trading Dashboard</h1>
+
+        <p>
+            Automated 5-minute forex signal system
+        </p>
+
+        <div class="session">
+            Session:
+            <strong id="session">Checking...</strong>
+        </div>
+
+        <div class="refresh">
+            Last update:
+            <span id="lastUpdate">--</span>
+        </div>
+
+    </div>
+
+    <!-- STATISTICS -->
+
+    <div class="cards">
+
+        <div class="card">
+            <div class="card-title">Signals Today</div>
+            <div class="card-value blue" id="signalsToday">0</div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Wins</div>
+            <div class="card-value green" id="wins">0</div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Losses</div>
+            <div class="card-value red" id="losses">0</div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Win Rate</div>
+            <div class="card-value yellow" id="winRate">0%</div>
+        </div>
+
+    </div>
+
+    <!-- BOT -->
+
+    <div class="section">
+
+        <h2>📡 Bot Status</h2>
+
+        <div class="pairs">
+
+            <div class="pair">
+
+                <div class="pair-top">
+                    <div class="pair-name">EUR/USD</div>
+                    <div class="pair-status">● ACTIVE</div>
+                </div>
+
+                <div class="pair-data">
+
+                    <div>
+                        <div class="data-label">Price</div>
+                        <div class="data-value" id="eurPrice">--</div>
+                    </div>
+
+                    <div>
+                        <div class="data-label">RSI</div>
+                        <div class="data-value" id="eurRsi">--</div>
+                    </div>
+
+                </div>
+
+                <div class="signal-box no-signal" id="eurSignal">
+                    No current signal
+                </div>
+
+            </div>
+
+
+            <div class="pair">
+
+                <div class="pair-top">
+                    <div class="pair-name">GBP/USD</div>
+                    <div class="pair-status">● ACTIVE</div>
+                </div>
+
+                <div class="pair-data">
+
+                    <div>
+                        <div class="data-label">Price</div>
+                        <div class="data-value" id="gbpPrice">--</div>
+                    </div>
+
+                    <div>
+                        <div class="data-label">RSI</div>
+                        <div class="data-value" id="gbpRsi">--</div>
+                    </div>
+
+                </div>
+
+                <div class="signal-box no-signal" id="gbpSignal">
+                    No current signal
+                </div>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- SIGNAL HISTORY -->
+
+    <div class="section">
+
+        <h2>📊 Signal History</h2>
+
+        <div class="table-container">
+
+            <table>
+
+                <thead>
+
+                    <tr>
+                        <th>Time</th>
+                        <th>Pair</th>
+                        <th>Signal</th>
+                        <th>Confidence</th>
+                        <th>Entry</th>
+                        <th>Result</th>
+                        <th>Session</th>
+                    </tr>
+
+                </thead>
+
+                <tbody id="history">
+
+                    <tr>
+                        <td colspan="7"
+                            style="text-align:center;color:#6b7280;">
+                            Loading...
+                        </td>
+                    </tr>
+
+                </tbody>
+
+            </table>
+
+        </div>
+
+    </div>
+
+
+    <div class="footer">
+        AI Forex Signal Bot • EUR/USD • GBP/USD • 5M
+    </div>
+
+</div>
+
+
+<script>
+
+async function loadDashboard() {
+
+    try {
+
+        const response =
+            await fetch("/api/dashboard");
+
+        if (!response.ok) {
+            throw new Error("API error");
+        }
+
+        const data =
+            await response.json();
+
+        updateDashboard(data);
+
+    } catch (error) {
+
+        document.getElementById("botStatus")
+            .textContent = "Offline";
+
+        console.error(error);
+
+    }
+
+}
+
+
+function updateDashboard(data) {
+
+    document.getElementById("botStatus")
+        .textContent = "Online";
+
+    document.getElementById("lastUpdate")
+        .textContent =
+        new Date().toLocaleTimeString();
+
+
+    if (data.stats) {
+
+        document.getElementById("signalsToday")
+            .textContent =
+            data.stats.signals_today ?? 0;
+
+        document.getElementById("wins")
+            .textContent =
+            data.stats.wins ?? 0;
+
+        document.getElementById("losses")
+            .textContent =
+            data.stats.losses ?? 0;
+
+        document.getElementById("winRate")
+            .textContent =
+            (data.stats.win_rate ?? 0) + "%";
+
+    }
+
+
+    if (data.session) {
+
+        document.getElementById("session")
+            .textContent =
+            data.session;
+
+    }
+
+
+    updatePair(
+        "EUR/USD",
+        data,
+        "eurPrice",
+        "eurRsi",
+        "eurSignal"
+    );
+
+    updatePair(
+        "GBP/USD",
+        data,
+        "gbpPrice",
+        "gbpRsi",
+        "gbpSignal"
+    );
+
+
+    if (data.history) {
+
+        const history =
+            document.getElementById("history");
+
+        history.innerHTML = "";
+
+        if (data.history.length === 0) {
+
+            history.innerHTML = `
+                <tr>
+                    <td colspan="7"
+                        style="text-align:center;color:#6b7280;">
+                        No signals yet
+                    </td>
+                </tr>
+            `;
+
+            return;
+        }
+
+
+        data.history.forEach(signal => {
+
+            const row =
+                document.createElement("tr");
+
+            let signalClass =
+                signal.signal === "CALL"
+                    ? "call"
+                    : "put";
+
+            let resultClass = "";
+
+            if (signal.result === "WIN")
+                resultClass = "win";
+
+            else if (signal.result === "LOSS")
+                resultClass = "loss";
+
+            else
+                resultClass = "pending";
+
+
+            row.innerHTML = `
+
+                <td>${signal.time ?? "--"}</td>
+
+                <td>${signal.pair ?? "--"}</td>
+
+                <td>
+                    <span class="badge ${signalClass}">
+                        ${signal.signal ?? "--"}
+                    </span>
+                </td>
+
+                <td>
+                    ${signal.confidence ?? "--"}%
+                </td>
+
+                <td>
+                    ${signal.entry_price ?? "--"}
+                </td>
+
+                <td>
+                    <span class="badge ${resultClass}">
+                        ${signal.result ?? "PENDING"}
+                    </span>
+                </td>
+
+                <td>
+                    ${signal.session ?? "--"}
+                </td>
+
+            `;
+
+            history.appendChild(row);
+
+        });
+
+    }
+
+}
+
+
+function updatePair(
+    pair,
+    data,
+    priceId,
+    rsiId,
+    signalId
+) {
+
+    let info = null;
+
+    if (data.pairs) {
+
+        info = data.pairs[pair];
+
+    }
+
+    if (!info) return;
+
+
+    document.getElementById(priceId)
+        .textContent =
+        info.price ?? "--";
+
+    document.getElementById(rsiId)
+        .textContent =
+        info.rsi ?? "--";
+
+
+    const box =
+        document.getElementById(signalId);
+
+
+    if (info.signal) {
+
+        box.textContent =
+            info.signal +
+            " • " +
+            (info.confidence ?? "--") +
+            "%";
+
+        box.className =
+            "signal-box " +
+            (
+                info.signal === "CALL"
+                    ? "green"
+                    : "red"
+            );
+
+    } else {
+
+        box.textContent =
+            "No current signal";
+
+        box.className =
+            "signal-box no-signal";
+
+    }
+
+}
+
+
+loadDashboard();
+
+setInterval(
+    loadDashboard,
+    15000
+);
+
+
+/* Register PWA service worker */
+
+if ("serviceWorker" in navigator) {
+
+    window.addEventListener(
+        "load",
+        () => {
+
+            navigator.serviceWorker
+                .register("/sw.js")
+                .catch(error =>
+                    console.log(
+                        "Service worker error:",
+                        error
+                    )
+                );
+
+        }
+    );
+
+}
+
+</script>
+
+</body>
+</html>
