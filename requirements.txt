@@ -1,3 +1,6 @@
 fastapi
 uvicorn
-httpx
+pandas
+requests
+ta
+pytz
