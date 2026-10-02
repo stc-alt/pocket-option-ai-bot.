@@ -8,7 +8,8 @@ import pandas as pd
 import pytz
 import requests
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from ta.trend import EMAIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import AverageTrueRange
@@ -47,6 +48,9 @@ DB_FILE = "signals.db"
 # ============================================================
 
 app = FastAPI()
+
+# Mobile/desktop PWA files
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 # ============================================================
@@ -96,6 +100,21 @@ def init_database():
 # HOME
 # ============================================================
 
+@app.get("/app", response_class=HTMLResponse)
+def app_page():
+    return FileResponse("static/index.html")
+
+
+@app.get("/manifest.json")
+def manifest():
+    return FileResponse("static/manifest.json", media_type="application/manifest+json")
+
+
+@app.get("/sw.js")
+def service_worker():
+    return FileResponse("static/sw.js", media_type="application/javascript")
+
+
 @app.get("/", response_class=HTMLResponse)
 def home():
 
@@ -137,6 +156,10 @@ def home():
         <p>EUR/USD • GBP/USD</p>
         <p>5-minute candles • 2-minute expiry</p>
 
+        <a href="/app">
+            Open App
+        </a>
+        <br>
         <a href="/dashboard">
             Open Dashboard
         </a>
@@ -1135,6 +1158,24 @@ def dashboard_data():
             "result": row["result"]
         })
 
+    today = datetime.now(IST).strftime("%d-%m-%Y")
+    signals_today = sum(1 for item in signals if str(item["created_at"]).startswith(today))
+
+    pair_data = {
+        "EUR/USD": {"price": None, "rsi": None, "signal": None, "confidence": None},
+        "GBP/USD": {"price": None, "rsi": None, "signal": None, "confidence": None}
+    }
+
+    for item in signals:
+        pair = item["pair"]
+        if pair in pair_data and pair_data[pair]["signal"] is None:
+            pair_data[pair]["signal"] = item["signal"]
+            pair_data[pair]["confidence"] = item["confidence"]
+            pair_data[pair]["price"] = item["entry_price"]
+            pair_data[pair]["rsi"] = item["rsi"]
+
+    session = get_session()
+
     return {
         "total": total,
         "wins": wins,
@@ -1142,7 +1183,28 @@ def dashboard_data():
         "pending": pending,
         "draws": draws,
         "win_rate": win_rate,
-        "signals": signals
+        "signals": signals,
+        "stats": {
+            "signals_today": signals_today,
+            "wins": wins,
+            "losses": losses,
+            "pending": pending,
+            "win_rate": win_rate
+        },
+        "history": [
+            {
+                "time": item["created_at"],
+                "pair": item["pair"],
+                "signal": item["signal"],
+                "confidence": item["confidence"],
+                "entry_price": item["entry_price"],
+                "result": item["result"],
+                "session": item["session"]
+            }
+            for item in signals
+        ],
+        "session": session,
+        "pairs": pair_data
     }
 
 
@@ -2456,6 +2518,9 @@ def scanner_loop():
 
     print(
         "Dashboard: /dashboard"
+    )
+    print(
+        "App: /app"
     )
 
     print(
