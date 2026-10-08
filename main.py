@@ -1,57 +1,87 @@
 import os
-import time
-import threading
+import json
 import sqlite3
-from datetime import datetime
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytz
 import requests
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from ta.trend import EMAIndicator
 from ta.momentum import RSIIndicator
+from ta.trend import EMAIndicator
 from ta.volatility import AverageTrueRange
 
+try:
+    from pywebpush import webpush
+except ImportError:
+    webpush = None
 
 # ============================================================
-# CONFIGURATION
+# CONFIGURATION - V4 BALANCED QUALITY
 # ============================================================
 
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv(
-    "TELEGRAM_CHAT_ID",
-    "-1003903509447"
-)
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-1003903509447")
 
 IST = pytz.timezone("Asia/Kolkata")
 
+# All pairs used by the session selector. The scanner only scans
+# two pairs at a time to keep Twelve Data usage controlled.
 PAIRS = {
     "EUR/USD": "5min",
     "GBP/USD": "5min",
+    "USD/JPY": "5min",
+    "AUD/JPY": "5min",
+    "AUD/USD": "5min",
+    "NZD/USD": "5min",
+    "USD/CAD": "5min",
+}
+
+SESSION_PAIRS = {
+    "Sydney": ["AUD/USD", "NZD/USD"],
+    "Tokyo": ["USD/JPY", "AUD/JPY"],
+    "London": ["EUR/USD", "GBP/USD"],
+    "London / New York": ["EUR/USD", "GBP/USD"],
+    "New York": ["EUR/USD", "USD/CAD"],
 }
 
 CONFIDENCE_THRESHOLD = 70
-
-SCAN_INTERVAL = 300
 EXPIRY_MINUTES = 2
-
+SCAN_INTERVAL = 300  # 5 minutes
 USE_TRADING_HOURS = True
-
+DUPLICATE_COOLDOWN_MINUTES = 20
 DB_FILE = "signals.db"
 
-
-# ============================================================
-# FASTAPI
-# ============================================================
+# Web Push configuration. These can be added later in Render.
+VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY")
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY")
+VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", "mailto:admin@example.com")
 
 app = FastAPI()
-
-# Mobile/desktop PWA files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# Latest scan information is kept in memory for the dashboard.
+market_lock = threading.Lock()
+latest_market = {
+    pair: {
+        "price": None,
+        "rsi": None,
+        "score": None,
+        "signal": None,
+        "updated_at": None,
+        "active": False,
+    }
+    for pair in PAIRS
+}
+
+# Last sent signal time per pair/direction.
+last_signal_meta = {}
+last_signal_lock = threading.Lock()
 
 # ============================================================
 # DATABASE
@@ -61,21 +91,17 @@ db_lock = threading.Lock()
 
 
 def get_db():
-    connection = sqlite3.connect(
-        DB_FILE,
-        check_same_thread=False
-    )
-    connection.row_factory = sqlite3.Row
-    return connection
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def init_database():
-
     with db_lock:
-
         conn = get_db()
 
-        conn.execute("""
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at TEXT NOT NULL,
@@ -90,621 +116,440 @@ def init_database():
                 result TEXT DEFAULT 'PENDING',
                 expiry_minutes INTEGER NOT NULL
             )
-        """)
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                endpoint TEXT UNIQUE NOT NULL,
+                subscription_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
 
         conn.commit()
         conn.close()
 
 
 # ============================================================
-# HOME
+# TIME / SESSIONS
 # ============================================================
 
-@app.get("/app", response_class=HTMLResponse)
-def app_page():
-    return FileResponse("static/index.html")
-
-
-@app.get("/manifest.json")
-def manifest():
-    return FileResponse("static/manifest.json", media_type="application/manifest+json")
-
-
-@app.get("/sw.js")
-def service_worker():
-    return FileResponse("static/sw.js", media_type="application/javascript")
-
-
-@app.get("/", response_class=HTMLResponse)
-def home():
-
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>AI Forex Signal Bot</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-            body {
-                font-family: Arial, sans-serif;
-                background: #0f172a;
-                color: white;
-                text-align: center;
-                padding: 50px 20px;
-            }
-
-            h1 {
-                color: #38bdf8;
-            }
-
-            a {
-                display: inline-block;
-                margin-top: 20px;
-                padding: 14px 22px;
-                background: #2563eb;
-                color: white;
-                text-decoration: none;
-                border-radius: 10px;
-            }
-        </style>
-    </head>
-
-    <body>
-
-        <h1>AI Forex Signal Bot</h1>
-
-        <p>EUR/USD • GBP/USD</p>
-        <p>5-minute candles • 2-minute expiry</p>
-
-        <a href="/app">
-            Open App
-        </a>
-        <br>
-        <a href="/dashboard">
-            Open Dashboard
-        </a>
-
-    </body>
-    </html>
-    """
-
-
-@app.get("/health")
-def health():
-
-    return {
-        "status": "healthy",
-        "time": datetime.now(IST).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-    }
-
-
-# ============================================================
-# TIME
-# ============================================================
 
 def current_time():
+    return datetime.now(IST).strftime("%d-%m-%Y %H:%M:%S")
 
-    return datetime.now(IST).strftime(
-        "%d-%m-%Y %H:%M:%S"
-    )
+
+def _utc_hour_minute():
+    now = datetime.now(timezone.utc)
+    return now.hour * 60 + now.minute
+
+
+def _in_window(minutes, start, end):
+    if start <= end:
+        return start <= minutes < end
+    return minutes >= start or minutes < end
+
+
+def get_active_session_and_pairs():
+    """
+    Approximate major forex session windows in UTC.
+    During overlaps, choose the most useful 2-pair set so the
+    bot does not scan every pair simultaneously.
+    """
+    minutes = _utc_hour_minute()
+
+    sydney = _in_window(minutes, 22 * 60, 7 * 60)
+    tokyo = _in_window(minutes, 0, 9 * 60)
+    london = _in_window(minutes, 8 * 60, 17 * 60)
+    new_york = _in_window(minutes, 13 * 60, 22 * 60)
+
+    if london and new_york:
+        return "London / New York", SESSION_PAIRS["London / New York"]
+    if london:
+        return "London", SESSION_PAIRS["London"]
+    if new_york:
+        return "New York", SESSION_PAIRS["New York"]
+    if tokyo:
+        return "Tokyo", SESSION_PAIRS["Tokyo"]
+    if sydney:
+        return "Sydney", SESSION_PAIRS["Sydney"]
+
+    return "Outside Session", []
 
 
 def get_session():
-
-    now = datetime.now(IST)
-
-    minutes = now.hour * 60 + now.minute
-
-    london_start = 13 * 60 + 30
-    london_end = 17 * 60 + 30
-
-    new_york_start = 18 * 60 + 30
-    new_york_end = 22 * 60 + 30
-
-    if london_start <= minutes <= london_end:
-        return "London"
-
-    if new_york_start <= minutes <= new_york_end:
-        return "New York"
-
-    return "Outside Session"
+    return get_active_session_and_pairs()[0]
 
 
 def trading_hours():
-
     return get_session() != "Outside Session"
-
 
 # ============================================================
 # TWELVE DATA
 # ============================================================
 
+
 def get_market_data(symbol, interval):
-
     if not TWELVE_DATA_API_KEY:
-
-        print(
-            "ERROR: TWELVE_DATA_API_KEY is missing."
-        )
-
+        print("ERROR: TWELVE_DATA_API_KEY is missing.")
         return None
 
-    url = (
-        "https://api.twelvedata.com/time_series"
-    )
-
+    url = "https://api.twelvedata.com/time_series"
     params = {
         "symbol": symbol,
         "interval": interval,
         "outputsize": 100,
-        "apikey": TWELVE_DATA_API_KEY
+        "apikey": TWELVE_DATA_API_KEY,
     }
 
     try:
-
-        response = requests.get(
-            url,
-            params=params,
-            timeout=30
-        )
-
+        response = requests.get(url, params=params, timeout=30)
         response.raise_for_status()
-
         data = response.json()
 
         if "values" not in data:
-
-            print(
-                f"Twelve Data error for {symbol}: "
-                f"{data}"
-            )
-
+            print(f"Twelve Data error for {symbol}: {data}")
             return None
 
-        df = pd.DataFrame(
-            data["values"]
-        )
+        df = pd.DataFrame(data["values"])
+        for column in ["open", "high", "low", "close"]:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
 
-        for column in [
-            "open",
-            "high",
-            "low",
-            "close"
-        ]:
-
-            df[column] = pd.to_numeric(
-                df[column],
-                errors="coerce"
-            )
-
-        df = df.dropna(
-            subset=[
-                "open",
-                "high",
-                "low",
-                "close"
-            ]
-        )
-
-        df = df.iloc[::-1].reset_index(
-            drop=True
-        )
-
+        df = df.dropna(subset=["open", "high", "low", "close"])
+        df = df.iloc[::-1].reset_index(drop=True)
         return df
 
-    except requests.RequestException as e:
+    except requests.RequestException as exc:
+        print(f"Network error getting {symbol}: {exc}")
+    except Exception as exc:
+        print(f"Unexpected market-data error for {symbol}: {exc}")
 
-        print(
-            f"Network error getting {symbol}: {e}"
-        )
+    return None
 
-        return None
-
-    except Exception as e:
-
-        print(
-            f"Unexpected market-data error: {e}"
-        )
-
-        return None
-
-
-# ============================================================
-# CURRENT PRICE
-# ============================================================
 
 def get_current_price(symbol):
-
     if not TWELVE_DATA_API_KEY:
         return None
 
     url = "https://api.twelvedata.com/quote"
-
-    params = {
-        "symbol": symbol,
-        "apikey": TWELVE_DATA_API_KEY
-    }
+    params = {"symbol": symbol, "apikey": TWELVE_DATA_API_KEY}
 
     try:
-
-        response = requests.get(
-            url,
-            params=params,
-            timeout=30
-        )
-
+        response = requests.get(url, params=params, timeout=30)
         response.raise_for_status()
-
         data = response.json()
 
-        price = data.get("close")
-
-        if price is None:
-            price = data.get("price")
-
+        price = data.get("close") or data.get("price")
         if price is None:
             return None
 
         return float(price)
 
-    except Exception as e:
-
-        print(
-            f"Quote error for {symbol}: {e}"
-        )
-
+    except Exception as exc:
+        print(f"Quote error for {symbol}: {exc}")
         return None
-
 
 # ============================================================
 # INDICATORS
 # ============================================================
 
+
 def add_indicators(df):
-
-    df["ema20"] = EMAIndicator(
-        close=df["close"],
-        window=20
-    ).ema_indicator()
-
-    df["ema50"] = EMAIndicator(
-        close=df["close"],
-        window=50
-    ).ema_indicator()
-
-    df["rsi"] = RSIIndicator(
-        close=df["close"],
-        window=14
-    ).rsi()
+    df["ema20"] = EMAIndicator(close=df["close"], window=20).ema_indicator()
+    df["ema50"] = EMAIndicator(close=df["close"], window=50).ema_indicator()
+    df["rsi"] = RSIIndicator(close=df["close"], window=14).rsi()
 
     atr = AverageTrueRange(
         high=df["high"],
         low=df["low"],
         close=df["close"],
-        window=14
+        window=14,
     )
-
     df["atr"] = atr.average_true_range()
-
     return df
 
-
 # ============================================================
-# CANDLE PATTERNS
+# V4 SIGNAL ENGINE
+# No candle-pattern gate. Everything is calculated from numerical
+# OHLC/indicator values returned by Twelve Data.
 # ============================================================
 
-def bullish_engulfing(df):
 
-    if len(df) < 2:
-        return False
-
-    previous = df.iloc[-2]
-    current = df.iloc[-1]
-
-    return (
-        previous["close"] < previous["open"]
-        and current["close"] > current["open"]
-        and current["open"] < previous["close"]
-        and current["close"] > previous["open"]
-    )
+def _rsi_score_call(rsi):
+    if rsi >= 60:
+        return 20
+    if rsi >= 57:
+        return 16
+    if rsi >= 55:
+        return 12
+    if rsi >= 52:
+        return 7
+    return 0
 
 
-def bearish_engulfing(df):
-
-    if len(df) < 2:
-        return False
-
-    previous = df.iloc[-2]
-    current = df.iloc[-1]
-
-    return (
-        previous["close"] > previous["open"]
-        and current["close"] < current["open"]
-        and current["open"] > previous["close"]
-        and current["close"] < previous["open"]
-    )
+def _rsi_score_put(rsi):
+    if rsi <= 40:
+        return 20
+    if rsi <= 43:
+        return 16
+    if rsi <= 45:
+        return 12
+    if rsi <= 48:
+        return 7
+    return 0
 
 
-def hammer(df):
-
-    candle = df.iloc[-1]
-
-    body = abs(
-        candle["close"] -
-        candle["open"]
-    )
-
-    lower_wick = (
-        min(
-            candle["open"],
-            candle["close"]
-        )
-        -
-        candle["low"]
-    )
-
-    upper_wick = (
-        candle["high"]
-        -
-        max(
-            candle["open"],
-            candle["close"]
-        )
-    )
-
-    if body <= 0:
-        return False
-
-    return (
-        lower_wick > body * 2
-        and upper_wick < body
-    )
+def _pullback_score(price, ema20, atr):
+    distance = abs(price - ema20)
+    if distance <= atr * 0.75:
+        return 15
+    if distance <= atr * 1.5:
+        return 12
+    if distance <= atr * 2.0:
+        return 8
+    return 0
 
 
-def shooting_star(df):
+def _atr_score(atr, atr_average):
+    if atr >= atr_average * 1.05:
+        return 15
+    if atr >= atr_average * 0.85:
+        return 10
+    if atr >= atr_average * 0.70:
+        return 5
+    return 0
 
-    candle = df.iloc[-1]
-
-    body = abs(
-        candle["close"] -
-        candle["open"]
-    )
-
-    upper_wick = (
-        candle["high"]
-        -
-        max(
-            candle["open"],
-            candle["close"]
-        )
-    )
-
-    lower_wick = (
-        min(
-            candle["open"],
-            candle["close"]
-        )
-        -
-        candle["low"]
-    )
-
-    if body <= 0:
-        return False
-
-    return (
-        upper_wick > body * 2
-        and lower_wick < body
-    )
-
-
-# ============================================================
-# SIGNAL ENGINE
-# ============================================================
 
 def generate_signal(df):
-
     if len(df) < 60:
         return None
 
     last = df.iloc[-1]
+    previous = df.iloc[-2]
+    previous2 = df.iloc[-3]
 
     price = float(last["close"])
     ema20 = float(last["ema20"])
     ema50 = float(last["ema50"])
     rsi = float(last["rsi"])
     atr = float(last["atr"])
+    prev_ema20 = float(previous["ema20"])
+    atr_average = float(df["atr"].tail(30).mean())
 
-    values = [
-        price,
-        ema20,
-        ema50,
-        rsi,
-        atr
-    ]
-
-    if any(
-        pd.isna(value)
-        for value in values
-    ):
+    values = [price, ema20, ema50, rsi, atr, prev_ema20, atr_average]
+    if any(pd.isna(value) for value in values):
         return None
 
-    atr_average = float(
-        df["atr"].mean()
-    )
-
-    confidence = 0
-
-    reasons = []
+    pullback_score = _pullback_score(price, ema20, atr)
+    atr_score = _atr_score(atr, atr_average)
 
     uptrend = ema20 > ema50
     downtrend = ema20 < ema50
+    ema_slope_up = ema20 > prev_ema20
+    ema_slope_down = ema20 < prev_ema20
 
-    # Trend
-    if uptrend:
+    short_momentum_up = float(last["close"]) > float(previous["close"]) > float(previous2["close"])
+    short_momentum_down = float(last["close"]) < float(previous["close"]) < float(previous2["close"])
 
-        confidence += 25
-        reasons.append("Trend Up")
+    # Minimum directional RSI prevents weak cases like RSI 50.1 CALL.
+    if uptrend and rsi >= 52:
+        score = 30
+        reasons = ["EMA20 > EMA50"]
 
-    elif downtrend:
+        if ema_slope_up:
+            score += 10
+            reasons.append("EMA20 Rising")
 
-        confidence += 25
-        reasons.append("Trend Down")
+        rsi_points = _rsi_score_call(rsi)
+        score += rsi_points
+        if rsi_points:
+            reasons.append("RSI Bullish")
 
-    # Pullback
-    if abs(
-        price - ema20
-    ) <= atr * 2:
+        score += pullback_score
+        if pullback_score:
+            reasons.append("Pullback EMA20")
 
-        confidence += 20
-        reasons.append("Pullback EMA20")
+        score += atr_score
+        if atr_score:
+            reasons.append("Healthy ATR")
 
-    # Volatility
-    if atr > atr_average:
+        if short_momentum_up:
+            score += 10
+            reasons.append("Momentum Up")
 
-        confidence += 20
-        reasons.append("ATR Confirmed")
-
-    # CALL
-    if uptrend and rsi > 50:
-
-        if bullish_engulfing(df):
-
-            confidence += 35
-            reasons.append(
-                "Bullish Engulfing"
-            )
-
-        elif hammer(df):
-
-            confidence += 35
-            reasons.append("Hammer")
-
-        if confidence >= CONFIDENCE_THRESHOLD:
-
+        if score >= CONFIDENCE_THRESHOLD:
             return {
                 "signal": "CALL",
-                "confidence": confidence,
+                "confidence": min(score, 100),
                 "reasons": reasons,
                 "price": price,
-                "rsi": rsi
+                "rsi": rsi,
             }
 
-    # PUT
-    if downtrend and rsi < 50:
+    if downtrend and rsi <= 48:
+        score = 30
+        reasons = ["EMA20 < EMA50"]
 
-        if bearish_engulfing(df):
+        if ema_slope_down:
+            score += 10
+            reasons.append("EMA20 Falling")
 
-            confidence += 35
-            reasons.append(
-                "Bearish Engulfing"
-            )
+        rsi_points = _rsi_score_put(rsi)
+        score += rsi_points
+        if rsi_points:
+            reasons.append("RSI Bearish")
 
-        elif shooting_star(df):
+        score += pullback_score
+        if pullback_score:
+            reasons.append("Pullback EMA20")
 
-            confidence += 35
-            reasons.append(
-                "Shooting Star"
-            )
+        score += atr_score
+        if atr_score:
+            reasons.append("Healthy ATR")
 
-        if confidence >= CONFIDENCE_THRESHOLD:
+        if short_momentum_down:
+            score += 10
+            reasons.append("Momentum Down")
 
+        if score >= CONFIDENCE_THRESHOLD:
             return {
                 "signal": "PUT",
-                "confidence": confidence,
+                "confidence": min(score, 100),
                 "reasons": reasons,
                 "price": price,
-                "rsi": rsi
+                "rsi": rsi,
             }
 
     return None
-
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
+
 def send_telegram(message):
-
     if not TELEGRAM_BOT_TOKEN:
-
-        print(
-            "ERROR: TELEGRAM_BOT_TOKEN missing."
-        )
-
+        print("ERROR: TELEGRAM_BOT_TOKEN missing.")
         return False
 
-    url = (
-        "https://api.telegram.org/bot"
-        f"{TELEGRAM_BOT_TOKEN}"
-        "/sendMessage"
-    )
-
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
-    }
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
 
     try:
-
-        response = requests.post(
-            url,
-            data=payload,
-            timeout=30
-        )
-
-        print(
-            "Telegram:",
-            response.status_code,
-            response.text
-        )
-
+        response = requests.post(url, data=payload, timeout=30)
+        print("Telegram:", response.status_code, response.text)
         return response.ok
-
-    except Exception as e:
-
-        print(
-            f"Telegram error: {e}"
-        )
-
+    except Exception as exc:
+        print(f"Telegram error: {exc}")
         return False
 
-
 # ============================================================
-# SAVE SIGNAL
+# WEB PUSH
 # ============================================================
 
-def save_signal(
-    pair,
-    signal,
-    confidence,
-    entry_price,
-    rsi,
-    session,
-    reasons
-):
+
+def save_push_subscription(subscription):
+    endpoint = subscription.get("endpoint")
+    if not endpoint:
+        return False
 
     with db_lock:
-
         conn = get_db()
+        conn.execute(
+            """
+            INSERT INTO push_subscriptions(endpoint, subscription_json, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(endpoint) DO UPDATE SET
+                subscription_json = excluded.subscription_json,
+                created_at = excluded.created_at
+            """,
+            (endpoint, json.dumps(subscription), current_time()),
+        )
+        conn.commit()
+        conn.close()
+    return True
 
+
+def remove_push_subscription(endpoint):
+    with db_lock:
+        conn = get_db()
+        conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
+        conn.commit()
+        conn.close()
+
+
+def send_web_push(signal, pair, confidence, entry_price, reasons):
+    if not VAPID_PUBLIC_KEY or not VAPID_PRIVATE_KEY:
+        print("[PUSH] VAPID keys are not configured.")
+        return
+
+    if webpush is None:
+        print("[PUSH] pywebpush is not installed.")
+        return
+
+    with db_lock:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT endpoint, subscription_json FROM push_subscriptions"
+        ).fetchall()
+        conn.close()
+
+    if not rows:
+        print("[PUSH] No subscribed devices.")
+        return
+
+    payload = json.dumps(
+        {
+            "title": f"{signal} • {pair}",
+            "body": (
+                f"Score {confidence}% • Entry {entry_price:.5f} • "
+                f"Expiry {EXPIRY_MINUTES} min"
+            ),
+            "signal": signal,
+            "pair": pair,
+            "confidence": confidence,
+            "entry_price": entry_price,
+            "reasons": reasons,
+            "url": "/app",
+        }
+    )
+
+    for row in rows:
+        try:
+            webpush(
+                subscription_info=json.loads(row["subscription_json"]),
+                data=payload,
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims={"sub": VAPID_SUBJECT},
+                ttl=300,
+            )
+            print("[PUSH] Notification sent.")
+        except Exception as exc:
+            status_code = getattr(exc, "status_code", None)
+            if status_code in (404, 410):
+                remove_push_subscription(row["endpoint"])
+                print("[PUSH] Removed expired subscription.")
+            else:
+                print(f"[PUSH] Failed: {exc}")
+
+# ============================================================
+# SIGNAL STORAGE / RESULTS
+# ============================================================
+
+
+def save_signal(pair, signal, confidence, entry_price, rsi, session, reasons):
+    with db_lock:
+        conn = get_db()
         cursor = conn.execute(
             """
-            INSERT INTO signals
-            (
-                created_at,
-                pair,
-                signal,
-                confidence,
-                entry_price,
-                rsi,
-                session,
-                reasons,
-                result,
-                expiry_minutes
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO signals(
+                created_at, pair, signal, confidence, entry_price,
+                rsi, session, reasons, result, expiry_minutes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 current_time(),
@@ -716,237 +561,142 @@ def save_signal(
                 session,
                 ", ".join(reasons),
                 "PENDING",
-                EXPIRY_MINUTES
-            )
+                EXPIRY_MINUTES,
+            ),
         )
-
         signal_id = cursor.lastrowid
-
         conn.commit()
-
         conn.close()
-
     return signal_id
 
 
-# ============================================================
-# UPDATE RESULT
-# ============================================================
-
-def update_result(
-    signal_id,
-    exit_price,
-    result
-):
-
+def update_result(signal_id, exit_price, result):
     with db_lock:
-
         conn = get_db()
-
         conn.execute(
-            """
-            UPDATE signals
-            SET exit_price = ?,
-                result = ?
-            WHERE id = ?
-            """,
-            (
-                exit_price,
-                result,
-                signal_id
-            )
+            "UPDATE signals SET exit_price = ?, result = ? WHERE id = ?",
+            (exit_price, result, signal_id),
         )
-
         conn.commit()
-
         conn.close()
 
 
-# ============================================================
-# RESULT CHECKER
-# ============================================================
+def check_signal_result(signal_id, pair, signal, entry_price):
+    print(f"[RESULT] Signal #{signal_id} waiting {EXPIRY_MINUTES} minutes...")
+    time.sleep(EXPIRY_MINUTES * 60)
 
-def check_signal_result(
-    signal_id,
-    pair,
-    signal,
-    entry_price
-):
-
-    print(
-        f"[RESULT] Signal #{signal_id} "
-        f"waiting {EXPIRY_MINUTES} minutes..."
-    )
-
-    time.sleep(
-        EXPIRY_MINUTES * 60
-    )
-
-    exit_price = get_current_price(
-        pair
-    )
-
+    exit_price = get_current_price(pair)
     if exit_price is None:
-
-        print(
-            f"[RESULT] Could not get "
-            f"exit price for {pair}"
-        )
-
+        print(f"[RESULT] Could not get exit price for {pair}")
         return
 
     if signal == "CALL":
-
         if exit_price > entry_price:
-
             result = "WIN"
-
         elif exit_price < entry_price:
-
             result = "LOSS"
-
         else:
-
             result = "DRAW"
-
     else:
-
         if exit_price < entry_price:
-
             result = "WIN"
-
         elif exit_price > entry_price:
-
             result = "LOSS"
-
         else:
-
             result = "DRAW"
 
-    update_result(
-        signal_id,
-        exit_price,
-        result
-    )
-
+    update_result(signal_id, exit_price, result)
     print(
-        f"[RESULT] #{signal_id} "
-        f"{pair} {signal} "
-        f"Entry={entry_price:.5f} "
-        f"Exit={exit_price:.5f} "
-        f"Result={result}"
+        f"[RESULT] #{signal_id} {pair} {signal} "
+        f"Entry={entry_price:.5f} Exit={exit_price:.5f} Result={result}"
     )
 
 
+def is_duplicate(pair, signal):
+    now = datetime.now(timezone.utc)
+    key = (pair, signal)
+
+    with last_signal_lock:
+        previous = last_signal_meta.get(key)
+        if previous is not None:
+            age_minutes = (now - previous).total_seconds() / 60
+            if age_minutes < DUPLICATE_COOLDOWN_MINUTES:
+                return True
+        last_signal_meta[key] = now
+        return False
+
+
+def has_pending_trade(pair):
+    with db_lock:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT id FROM signals WHERE pair = ? AND result = 'PENDING' LIMIT 1",
+            (pair,),
+        ).fetchone()
+        conn.close()
+    return row is not None
+
 # ============================================================
-# DUPLICATE PROTECTION
+# SCANNER
 # ============================================================
 
-last_signals = {}
 
-
-def is_duplicate(
-    pair,
-    signal
-):
-
-    previous = last_signals.get(
-        pair
-    )
-
-    if previous == signal:
-
-        return True
-
-    last_signals[pair] = signal
-
-    return False
-
-
-# ============================================================
-# SCAN PAIR
-# ============================================================
-
-def scan_pair(
-    pair,
-    timeframe
-):
-
-    print()
-    print(
-        f"Scanning {pair}..."
-    )
-
-    df = get_market_data(
-        pair,
-        timeframe
-    )
-
-    if df is None:
-
-        print(
-            f"{pair}: No market data."
+def update_latest_market(pair, price, rsi, signal=None, score=None, active=False):
+    with market_lock:
+        latest_market[pair].update(
+            {
+                "price": price,
+                "rsi": rsi,
+                "score": score,
+                "signal": signal,
+                "updated_at": current_time(),
+                "active": active,
+            }
         )
 
+
+def scan_pair(pair, timeframe, active_session):
+    print(f"\nScanning {pair}...")
+
+    df = get_market_data(pair, timeframe)
+    if df is None:
+        print(f"{pair}: No market data.")
         return
 
     try:
-
         df = add_indicators(df)
-
-    except Exception as e:
-
-        print(
-            f"{pair}: Indicator error: {e}"
-        )
-
+    except Exception as exc:
+        print(f"{pair}: Indicator error: {exc}")
         return
 
     last = df.iloc[-1]
+    price = float(last["close"])
+    rsi = float(last["rsi"])
 
-    price = float(
-        last["close"]
-    )
-
-    rsi = float(
-        last["rsi"]
-    )
-
-    print(
-        f"{pair} | "
-        f"Price={price:.5f} | "
-        f"RSI={rsi:.1f}"
-    )
+    print(f"{pair} | Price={price:.5f} | RSI={rsi:.1f}")
 
     result = generate_signal(df)
-
     if result is None:
-
-        print(
-            f"{pair}: No valid signal."
-        )
-
+        update_latest_market(pair, price, rsi, active=True)
+        print(f"{pair}: No valid signal.")
         return
 
     signal = result["signal"]
-
     confidence = result["confidence"]
-
     reasons = result["reasons"]
 
-    if is_duplicate(
-        pair,
-        signal
-    ):
+    update_latest_market(pair, price, rsi, signal=signal, score=confidence, active=True)
 
-        print(
-            f"{pair}: Duplicate "
-            f"{signal} ignored."
-        )
-
+    if has_pending_trade(pair):
+        print(f"{pair}: Pending trade already exists; skipping new signal.")
         return
 
-    session = get_session()
+    if is_duplicate(pair, signal):
+        print(
+            f"{pair}: Duplicate {signal} ignored "
+            f"(cooldown {DUPLICATE_COOLDOWN_MINUTES} min)."
+        )
+        return
 
     signal_id = save_signal(
         pair=pair,
@@ -954,1620 +704,353 @@ def scan_pair(
         confidence=confidence,
         entry_price=result["price"],
         rsi=result["rsi"],
-        session=session,
-        reasons=reasons
+        session=active_session,
+        reasons=reasons,
     )
 
-    emoji = (
-        "🟢"
-        if signal == "CALL"
-        else "🔴"
+    emoji = "🟢" if signal == "CALL" else "🔴"
+    message_lines = [
+        f"{emoji} {signal} {pair}",
+        "",
+        f"Score: {confidence}%",
+        f"Expiry: {EXPIRY_MINUTES} Minutes",
+        f"Session: {active_session}",
+        "",
+        "Reasons:",
+    ]
+    message_lines.extend(f"✓ {reason}" for reason in reasons)
+    message_lines.extend(
+        [
+            "",
+            f"Entry Price: {result['price']:.5f}",
+            f"RSI: {result['rsi']:.1f}",
+            f"Time: {current_time()}",
+        ]
     )
+    message = "\n".join(message_lines)
 
-    message = (
-        f"{emoji} {signal} {pair}\n\n"
-        f"Confidence: {confidence}%\n\n"
-        f"Expiry: "
-        f"{EXPIRY_MINUTES} Minutes\n\n"
-        f"Session: {session}\n\n"
-        f"Reasons:\n"
-    )
+    print("\n" + message)
 
-    for reason in reasons:
-
-        message += (
-            f"✓ {reason}\n"
-        )
-
-    message += (
-        f"\nEntry Price: "
-        f"{result['price']:.5f}"
-        f"\nRSI: "
-        f"{result['rsi']:.1f}"
-        f"\nTime: "
-        f"{current_time()}"
-    )
-
-    print()
-    print(message)
-
-    success = send_telegram(
-        message
-    )
-
-    if success:
-
-        print(
-            f"{pair}: Telegram "
-            f"signal sent."
-        )
-
+    if send_telegram(message):
+        print(f"{pair}: Telegram signal sent.")
     else:
+        print(f"{pair}: Telegram signal FAILED.")
 
-        print(
-            f"{pair}: Telegram "
-            f"signal FAILED."
-        )
+    send_web_push(
+        signal=signal,
+        pair=pair,
+        confidence=confidence,
+        entry_price=result["price"],
+        reasons=reasons,
+    )
 
-    # Result checker runs separately
     result_thread = threading.Thread(
         target=check_signal_result,
-        args=(
-            signal_id,
-            pair,
-            signal,
-            result["price"]
-        ),
-        daemon=True
+        args=(signal_id, pair, signal, result["price"]),
+        daemon=True,
     )
-
     result_thread.start()
 
 
-# ============================================================
-# MARKET SCANNER
-# ============================================================
-
 def run_scan():
-
-    if (
-        USE_TRADING_HOURS
-        and not trading_hours()
-    ):
-
-        print(
-            f"[{current_time()}] "
-            "Outside trading session."
-        )
-
-        return
+    if USE_TRADING_HOURS:
+        active_session, active_pairs = get_active_session_and_pairs()
+        if not active_pairs:
+            print(f"[{current_time()}] Outside trading session.")
+            return
+    else:
+        active_session = "24H"
+        active_pairs = list(PAIRS.keys())[:2]
 
     print(
-        f"[{current_time()}] "
-        "Starting market scan..."
+        f"[{current_time()}] Starting market scan... "
+        f"Session={active_session} Pairs={', '.join(active_pairs)}"
     )
 
-    for pair, timeframe in PAIRS.items():
-
+    for pair in active_pairs:
         try:
-
-            scan_pair(
-                pair,
-                timeframe
-            )
-
-        except Exception as e:
-
-            print(
-                f"{pair}: "
-                f"Unexpected error: {e}"
-            )
-
+            scan_pair(pair, PAIRS[pair], active_session)
+        except Exception as exc:
+            print(f"{pair}: Unexpected error: {exc}")
         time.sleep(3)
 
-    print(
-        f"[{current_time()}] "
-        "Scan complete."
+    print(f"[{current_time()}] Scan complete.")
+
+# ============================================================
+# PUSH ROUTES
+# ============================================================
+
+
+@app.get("/api/push/public-key")
+def push_public_key():
+    return {"public_key": VAPID_PUBLIC_KEY or ""}
+
+
+@app.post("/api/push/subscribe")
+def push_subscribe(subscription: dict):
+    if not save_push_subscription(subscription):
+        return {"success": False, "message": "Invalid subscription."}
+    return {"success": True, "message": "Notifications enabled."}
+
+
+@app.delete("/api/push/subscribe")
+def push_unsubscribe(subscription: dict):
+    endpoint = subscription.get("endpoint")
+    if endpoint:
+        remove_push_subscription(endpoint)
+    return {"success": True}
+
+# ============================================================
+# PWA / HOME
+# ============================================================
+
+
+@app.get("/app", response_class=HTMLResponse)
+def app_page():
+    return FileResponse("static/index.html")
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard_page():
+    return FileResponse("static/index.html")
+
+
+@app.get("/manifest.json")
+def manifest():
+    return FileResponse(
+        "static/manifest.json",
+        media_type="application/manifest+json",
     )
 
 
-# ============================================================
-# DASHBOARD API
-# ============================================================
-
-@app.get("/api/dashboard")
-def dashboard_data():
-
-    with db_lock:
-
-        conn = get_db()
-
-        total = conn.execute(
-            "SELECT COUNT(*) FROM signals"
-        ).fetchone()[0]
-
-        wins = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM signals
-            WHERE result = 'WIN'
-            """
-        ).fetchone()[0]
-
-        losses = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM signals
-            WHERE result = 'LOSS'
-            """
-        ).fetchone()[0]
-
-        pending = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM signals
-            WHERE result = 'PENDING'
-            """
-        ).fetchone()[0]
-
-        draws = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM signals
-            WHERE result = 'DRAW'
-            """
-        ).fetchone()[0]
-
-        rows = conn.execute(
-            """
-            SELECT *
-            FROM signals
-            ORDER BY id DESC
-            LIMIT 100
-            """
-        ).fetchall()
-
-        conn.close()
-
-    completed = wins + losses
-
-    win_rate = (
-        round(
-            (wins / completed) * 100,
-            1
-        )
-        if completed > 0
-        else 0
+@app.get("/sw.js")
+def service_worker():
+    return FileResponse(
+        "static/sw.js",
+        media_type="application/javascript",
     )
 
-    signals = []
 
-    for row in rows:
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return """
+    <!doctype html>
+    <html>
+    <head>
+      <meta name='viewport' content='width=device-width,initial-scale=1'>
+      <title>AI Forex Signal Bot</title>
+      <style>
+        body{font-family:Arial;background:#080c17;color:white;text-align:center;padding:50px 20px}
+        a{display:inline-block;margin:8px;padding:13px 20px;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none}
+      </style>
+    </head>
+    <body>
+      <h1>AI Forex Signal Bot</h1>
+      <p>V4 Balanced Quality • 5-minute candles • 2-minute expiry</p>
+      <a href='/app'>Open App</a>
+      <a href='/dashboard'>Open Dashboard</a>
+    </body>
+    </html>
+    """
 
-        signals.append({
-            "id": row["id"],
-            "created_at": row["created_at"],
-            "pair": row["pair"],
-            "signal": row["signal"],
-            "confidence": row["confidence"],
-            "entry_price": row["entry_price"],
-            "exit_price": row["exit_price"],
-            "rsi": row["rsi"],
-            "session": row["session"],
-            "reasons": row["reasons"],
-            "result": row["result"]
-        })
 
-    today = datetime.now(IST).strftime("%d-%m-%Y")
-    signals_today = sum(1 for item in signals if str(item["created_at"]).startswith(today))
-
-    pair_data = {
-        "EUR/USD": {"price": None, "rsi": None, "signal": None, "confidence": None},
-        "GBP/USD": {"price": None, "rsi": None, "signal": None, "confidence": None}
+@app.get("/health")
+def health():
+    session, active_pairs = get_active_session_and_pairs()
+    return {
+        "status": "healthy",
+        "time": current_time(),
+        "session": session,
+        "active_pairs": active_pairs,
+        "threshold": CONFIDENCE_THRESHOLD,
+        "expiry_minutes": EXPIRY_MINUTES,
     }
 
-    for item in signals:
-        pair = item["pair"]
-        if pair in pair_data and pair_data[pair]["signal"] is None:
-            pair_data[pair]["signal"] = item["signal"]
-            pair_data[pair]["confidence"] = item["confidence"]
-            pair_data[pair]["price"] = item["entry_price"]
-            pair_data[pair]["rsi"] = item["rsi"]
+# ============================================================
+# DASHBOARD DATA - MULTI-DAY HISTORY
+# ============================================================
 
-    session = get_session()
+
+def parse_created_at(value):
+    try:
+        return IST.localize(datetime.strptime(value, "%d-%m-%Y %H:%M:%S"))
+    except Exception:
+        return None
+
+
+def calc_stats(rows):
+    total = len(rows)
+    wins = sum(1 for row in rows if row["result"] == "WIN")
+    losses = sum(1 for row in rows if row["result"] == "LOSS")
+    pending = sum(1 for row in rows if row["result"] == "PENDING")
+    draws = sum(1 for row in rows if row["result"] == "DRAW")
+    completed = wins + losses
+    win_rate = round((wins / completed) * 100, 1) if completed else 0
+    avg_score = round(sum(int(row["confidence"]) for row in rows) / total, 1) if total else 0
 
     return {
-        "total": total,
+        "signals": total,
         "wins": wins,
         "losses": losses,
         "pending": pending,
         "draws": draws,
         "win_rate": win_rate,
-        "signals": signals,
-        "stats": {
-            "signals_today": signals_today,
-            "wins": wins,
-            "losses": losses,
-            "pending": pending,
-            "win_rate": win_rate
-        },
-        "history": [
+        "avg_score": avg_score,
+        "completed": completed,
+    }
+
+
+@app.get("/api/dashboard")
+def dashboard_data(days: int = 7):
+    days = max(0, min(days, 3650))
+
+    with db_lock:
+        conn = get_db()
+        db_rows = conn.execute(
+            "SELECT * FROM signals ORDER BY id DESC LIMIT 5000"
+        ).fetchall()
+        conn.close()
+
+    rows = list(db_rows)
+
+    now = datetime.now(IST)
+    start_dt = None if days == 0 else (now - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    selected = []
+    for row in rows:
+        dt = parse_created_at(row["created_at"])
+        if dt is None:
+            continue
+        if start_dt is None or dt >= start_dt:
+            selected.append(row)
+
+    overall = calc_stats(rows)
+    selected_stats = calc_stats(selected)
+
+    # Pair breakdown for the selected period.
+    pair_stats = {}
+    for pair in PAIRS:
+        pair_rows = [row for row in selected if row["pair"] == pair]
+        pair_stats[pair] = calc_stats(pair_rows)
+
+    # Session breakdown for the selected period.
+    session_names = ["Sydney", "Tokyo", "London", "London / New York", "New York"]
+    session_stats = {}
+    for session in session_names:
+        session_rows = [row for row in selected if row["session"] == session]
+        session_stats[session] = calc_stats(session_rows)
+
+    # Daily breakdown: every day represented in the selected period.
+    daily_map = {}
+    for row in selected:
+        dt = parse_created_at(row["created_at"])
+        if dt is None:
+            continue
+        day = dt.strftime("%Y-%m-%d")
+        daily_map.setdefault(day, []).append(row)
+
+    daily = []
+    for day, day_rows in sorted(daily_map.items(), reverse=True):
+        stats = calc_stats(day_rows)
+        daily.append({"date": day, **stats})
+
+    history = []
+    for row in selected[:300]:
+        history.append(
             {
-                "time": item["created_at"],
-                "pair": item["pair"],
-                "signal": item["signal"],
-                "confidence": item["confidence"],
-                "entry_price": item["entry_price"],
-                "result": item["result"],
-                "session": item["session"]
+                "id": row["id"],
+                "time": row["created_at"],
+                "pair": row["pair"],
+                "signal": row["signal"],
+                "confidence": row["confidence"],
+                "entry_price": row["entry_price"],
+                "exit_price": row["exit_price"],
+                "rsi": row["rsi"],
+                "result": row["result"],
+                "session": row["session"],
+                "reasons": row["reasons"],
             }
-            for item in signals
-        ],
-        "session": session,
-        "pairs": pair_data
-    }
-
-
-# ============================================================
-# DASHBOARD
-# ============================================================
-
-@app.get(
-    "/dashboard",
-    response_class=HTMLResponse
-)
-def dashboard():
-
-    return """
-<!DOCTYPE html>
-
-<html>
-
-<head>
-
-<title>AI Forex Signal Dashboard</title>
-
-<meta
-    name="viewport"
-    content="width=device-width, initial-scale=1"
-/>
-
-<style>
-
-* {
-    box-sizing: border-box;
-}
-
-body {
-
-    margin: 0;
-
-    font-family:
-        Arial,
-        Helvetica,
-        sans-serif;
-
-    background:
-        linear-gradient(
-            135deg,
-            #020617,
-            #0f172a
-        );
-
-    color: #f8fafc;
-}
-
-.container {
-
-    max-width: 1250px;
-
-    margin: auto;
-
-    padding: 25px;
-}
-
-.header {
-
-    display: flex;
-
-    justify-content:
-        space-between;
-
-    align-items:
-        center;
-
-    gap: 20px;
-
-    margin-bottom: 25px;
-
-    flex-wrap: wrap;
-}
-
-.title {
-
-    font-size: 30px;
-
-    font-weight: 800;
-
-    color: #38bdf8;
-}
-
-.subtitle {
-
-    color: #94a3b8;
-
-    margin-top: 5px;
-}
-
-.refresh {
-
-    border: 0;
-
-    background:
-        #2563eb;
-
-    color: white;
-
-    padding:
-        11px 18px;
-
-    border-radius:
-        10px;
-
-    cursor: pointer;
-
-    font-weight: 700;
-}
-
-.cards {
-
-    display:
-        grid;
-
-    grid-template-columns:
-        repeat(
-            5,
-            1fr
-        );
-
-    gap: 15px;
-}
-
-.card {
-
-    background:
-        rgba(
-            15,
-            23,
-            42,
-            0.9
-        );
-
-    border:
-        1px solid
-        #1e293b;
-
-    border-radius:
-        16px;
-
-    padding: 20px;
-
-    box-shadow:
-        0 10px 30px
-        rgba(
-            0,
-            0,
-            0,
-            0.2
-        );
-}
-
-.label {
-
-    color: #94a3b8;
-
-    font-size: 12px;
-
-    font-weight: 700;
-
-    letter-spacing:
-        0.5px;
-}
-
-.number {
-
-    font-size: 32px;
-
-    font-weight: 800;
-
-    margin-top: 8px;
-}
-
-.blue {
-    color: #38bdf8;
-}
-
-.green {
-    color: #22c55e;
-}
-
-.red {
-    color: #ef4444;
-}
-
-.yellow {
-    color: #eab308;
-}
-
-.purple {
-    color: #a855f7;
-}
-
-.section {
-
-    margin-top: 18px;
-}
-
-.section-title {
-
-    font-size: 18px;
-
-    font-weight: 800;
-
-    margin-bottom: 15px;
-}
-
-.analytics {
-
-    display:
-        grid;
-
-    grid-template-columns:
-        repeat(
-            2,
-            1fr
-        );
-
-    gap: 18px;
-}
-
-.stat-row {
-
-    display:
-        grid;
-
-    grid-template-columns:
-        100px
-        1fr
-        55px;
-
-    align-items:
-        center;
-
-    gap: 10px;
-
-    margin:
-        13px 0;
-
-    font-size: 13px;
-}
-
-.bar {
-
-    height: 10px;
-
-    background:
-        #1e293b;
-
-    border-radius:
-        50px;
-
-    overflow:
-        hidden;
-}
-
-.fill {
-
-    height: 100%;
-
-    border-radius:
-        50px;
-}
-
-.green-fill {
-    background: #22c55e;
-}
-
-.red-fill {
-    background: #ef4444;
-}
-
-.blue-fill {
-    background: #3b82f6;
-}
-
-.purple-fill {
-    background: #a855f7;
-}
-
-.table-container {
-
-    overflow-x:
-        auto;
-
-    border:
-        1px solid
-        #1e293b;
-
-    border-radius:
-        14px;
-}
-
-table {
-
-    width: 100%;
-
-    border-collapse:
-        collapse;
-
-    min-width:
-        900px;
-}
-
-th {
-
-    text-align:
-        left;
-
-    padding:
-        13px;
-
-    background:
-        #111827;
-
-    color:
-        #94a3b8;
-
-    font-size:
-        12px;
-}
-
-td {
-
-    padding:
-        13px;
-
-    border-top:
-        1px solid
-        #1e293b;
-
-    font-size:
-        12px;
-}
-
-.pill {
-
-    display:
-        inline-block;
-
-    padding:
-        5px 9px;
-
-    border-radius:
-        20px;
-
-    font-weight:
-        800;
-
-    font-size:
-        11px;
-}
-
-.call {
-
-    background:
-        rgba(
-            34,
-            197,
-            94,
-            0.15
-        );
-
-    color:
-        #22c55e;
-}
-
-.put {
-
-    background:
-        rgba(
-            239,
-            68,
-            68,
-            0.15
-        );
-
-    color:
-        #ef4444;
-}
-
-.win {
-
-    background:
-        rgba(
-            34,
-            197,
-            94,
-            0.15
-        );
-
-    color:
-        #22c55e;
-}
-
-.loss {
-
-    background:
-        rgba(
-            239,
-            68,
-            68,
-            0.15
-        );
-
-    color:
-        #ef4444;
-}
-
-.pending {
-
-    background:
-        rgba(
-            234,
-            179,
-            8,
-            0.15
-        );
-
-    color:
-        #eab308;
-}
-
-.draw {
-
-    background:
-        rgba(
-            148,
-            163,
-            184,
-            0.15
-        );
-
-    color:
-        #94a3b8;
-}
-
-.empty {
-
-    text-align:
-        center;
-
-    padding:
-        30px;
-
-    color:
-        #64748b;
-}
-
-@media(max-width:900px) {
-
-    .cards {
-
-        grid-template-columns:
-            repeat(
-                3,
-                1fr
-            );
-    }
-
-}
-
-@media(max-width:650px) {
-
-    .container {
-        padding: 15px;
-    }
-
-    .title {
-        font-size: 23px;
-    }
-
-    .cards {
-
-        grid-template-columns:
-            repeat(
-                2,
-                1fr
-            );
-    }
-
-    .analytics {
-
-        grid-template-columns:
-            1fr;
-    }
-
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="container">
-
-<div class="header">
-
-<div>
-
-<div class="title">
-AI Forex Signal Dashboard
-</div>
-
-<div class="subtitle">
-EUR/USD • GBP/USD • 5M • 2M Expiry
-</div>
-
-</div>
-
-<button
-    class="refresh"
-    onclick="loadDashboard()"
->
-↻ Refresh
-</button>
-
-</div>
-
-
-<div class="cards">
-
-<div class="card">
-
-<div class="label">
-TOTAL SIGNALS
-</div>
-
-<div
-    id="total"
-    class="number blue"
->
-0
-</div>
-
-</div>
-
-
-<div class="card">
-
-<div class="label">
-WINS
-</div>
-
-<div
-    id="wins"
-    class="number green"
->
-0
-</div>
-
-</div>
-
-
-<div class="card">
-
-<div class="label">
-LOSSES
-</div>
-
-<div
-    id="losses"
-    class="number red"
->
-0
-</div>
-
-</div>
-
-
-<div class="card">
-
-<div class="label">
-PENDING
-</div>
-
-<div
-    id="pending"
-    class="number yellow"
->
-0
-</div>
-
-</div>
-
-
-<div class="card">
-
-<div class="label">
-WIN RATE
-</div>
-
-<div
-    id="rate"
-    class="number purple"
->
-0%
-</div>
-
-</div>
-
-</div>
-
-
-<div class="analytics section">
-
-
-<div class="card">
-
-<div class="section-title">
-Results
-</div>
-
-<div class="stat-row">
-
-<span>Wins</span>
-
-<div class="bar">
-<div
-    id="winsBar"
-    class="fill green-fill"
-    style="width:0%"
-></div>
-</div>
-
-<strong id="winsPct">
-0%
-</strong>
-
-</div>
-
-
-<div class="stat-row">
-
-<span>Losses</span>
-
-<div class="bar">
-<div
-    id="lossBar"
-    class="fill red-fill"
-    style="width:0%"
-></div>
-</div>
-
-<strong id="lossPct">
-0%
-</strong>
-
-</div>
-
-</div>
-
-
-<div class="card">
-
-<div class="section-title">
-Directions
-</div>
-
-<div class="stat-row">
-
-<span>CALL</span>
-
-<div class="bar">
-<div
-    id="callBar"
-    class="fill green-fill"
-    style="width:50%"
-></div>
-</div>
-
-<strong id="callCount">
-0
-</strong>
-
-</div>
-
-
-<div class="stat-row">
-
-<span>PUT</span>
-
-<div class="bar">
-<div
-    id="putBar"
-    class="fill red-fill"
-    style="width:50%"
-></div>
-</div>
-
-<strong id="putCount">
-0
-</strong>
-
-</div>
-
-</div>
-
-
-<div class="card">
-
-<div class="section-title">
-Pairs
-</div>
-
-<div class="stat-row">
-
-<span>EUR/USD</span>
-
-<div class="bar">
-<div
-    id="eurBar"
-    class="fill blue-fill"
-    style="width:50%"
-></div>
-</div>
-
-<strong id="eurCount">
-0
-</strong>
-
-</div>
-
-
-<div class="stat-row">
-
-<span>GBP/USD</span>
-
-<div class="bar">
-<div
-    id="gbpBar"
-    class="fill purple-fill"
-    style="width:50%"
-></div>
-</div>
-
-<strong id="gbpCount">
-0
-</strong>
-
-</div>
-
-</div>
-
-
-<div class="card">
-
-<div class="section-title">
-Sessions
-</div>
-
-<div class="stat-row">
-
-<span>London</span>
-
-<div class="bar">
-<div
-    id="londonBar"
-    class="fill purple-fill"
-    style="width:50%"
-></div>
-</div>
-
-<strong id="londonCount">
-0
-</strong>
-
-</div>
-
-
-<div class="stat-row">
-
-<span>New York</span>
-
-<div class="bar">
-<div
-    id="nyBar"
-    class="fill blue-fill"
-    style="width:50%"
-></div>
-</div>
-
-<strong id="nyCount">
-0
-</strong>
-
-</div>
-
-</div>
-
-
-</div>
-
-
-<div class="card section">
-
-<div class="section-title">
-Signal History
-</div>
-
-<div class="table-container">
-
-<table>
-
-<thead>
-
-<tr>
-
-<th>Time</th>
-<th>Pair</th>
-<th>Signal</th>
-<th>Confidence</th>
-<th>Entry</th>
-<th>Exit</th>
-<th>RSI</th>
-<th>Session</th>
-<th>Result</th>
-
-</tr>
-
-</thead>
-
-<tbody id="signalRows">
-
-<tr>
-
-<td
-    colspan="9"
-    class="empty"
->
-No signals yet
-</td>
-
-</tr>
-
-</tbody>
-
-</table>
-
-</div>
-
-</div>
-
-</div>
-
-
-<script>
-
-async function loadDashboard() {
-
-    try {
-
-        const response =
-            await fetch(
-                "/api/dashboard"
-            );
-
-        const data =
-            await response.json();
-
-
-        document.getElementById(
-            "total"
-        ).textContent =
-            data.total;
-
-
-        document.getElementById(
-            "wins"
-        ).textContent =
-            data.wins;
-
-
-        document.getElementById(
-            "losses"
-        ).textContent =
-            data.losses;
-
-
-        document.getElementById(
-            "pending"
-        ).textContent =
-            data.pending;
-
-
-        document.getElementById(
-            "rate"
-        ).textContent =
-            data.win_rate + "%";
-
-
-        const completed =
-            data.wins +
-            data.losses;
-
-
-        const winPercent =
-            completed
-                ? (
-                    data.wins /
-                    completed *
-                    100
-                )
-                : 0;
-
-
-        const lossPercent =
-            completed
-                ? (
-                    data.losses /
-                    completed *
-                    100
-                )
-                : 0;
-
-
-        document.getElementById(
-            "winsBar"
-        ).style.width =
-            winPercent + "%";
-
-
-        document.getElementById(
-            "lossBar"
-        ).style.width =
-            lossPercent + "%";
-
-
-        document.getElementById(
-            "winsPct"
-        ).textContent =
-            Math.round(
-                winPercent
-            ) + "%";
-
-
-        document.getElementById(
-            "lossPct"
-        ).textContent =
-            Math.round(
-                lossPercent
-            ) + "%";
-
-
-        const signals =
-            data.signals;
-
-
-        const callCount =
-            signals.filter(
-                s =>
-                    s.signal === "CALL"
-            ).length;
-
-
-        const putCount =
-            signals.filter(
-                s =>
-                    s.signal === "PUT"
-            ).length;
-
-
-        const eurCount =
-            signals.filter(
-                s =>
-                    s.pair === "EUR/USD"
-            ).length;
-
-
-        const gbpCount =
-            signals.filter(
-                s =>
-                    s.pair === "GBP/USD"
-            ).length;
-
-
-        const londonCount =
-            signals.filter(
-                s =>
-                    s.session === "London"
-            ).length;
-
-
-        const nyCount =
-            signals.filter(
-                s =>
-                    s.session === "New York"
-            ).length;
-
-
-        document.getElementById(
-            "callCount"
-        ).textContent =
-            callCount;
-
-
-        document.getElementById(
-            "putCount"
-        ).textContent =
-            putCount;
-
-
-        document.getElementById(
-            "eurCount"
-        ).textContent =
-            eurCount;
-
-
-        document.getElementById(
-            "gbpCount"
-        ).textContent =
-            gbpCount;
-
-
-        document.getElementById(
-            "londonCount"
-        ).textContent =
-            londonCount;
-
-
-        document.getElementById(
-            "nyCount"
-        ).textContent =
-            nyCount;
-
-
-        const directionTotal =
-            callCount +
-            putCount;
-
-
-        const pairTotal =
-            eurCount +
-            gbpCount;
-
-
-        const sessionTotal =
-            londonCount +
-            nyCount;
-
-
-        document.getElementById(
-            "callBar"
-        ).style.width =
-            directionTotal
-                ? callCount /
-                    directionTotal *
-                    100 + "%"
-                : "0%";
-
-
-        document.getElementById(
-            "putBar"
-        ).style.width =
-            directionTotal
-                ? putCount /
-                    directionTotal *
-                    100 + "%"
-                : "0%";
-
-
-        document.getElementById(
-            "eurBar"
-        ).style.width =
-            pairTotal
-                ? eurCount /
-                    pairTotal *
-                    100 + "%"
-                : "0%";
-
-
-        document.getElementById(
-            "gbpBar"
-        ).style.width =
-            pairTotal
-                ? gbpCount /
-                    pairTotal *
-                    100 + "%"
-                : "0%";
-
-
-        document.getElementById(
-            "londonBar"
-        ).style.width =
-            sessionTotal
-                ? londonCount /
-                    sessionTotal *
-                    100 + "%"
-                : "0%";
-
-
-        document.getElementById(
-            "nyBar"
-        ).style.width =
-            sessionTotal
-                ? nyCount /
-                    sessionTotal *
-                    100 + "%"
-                : "0%";
-
-
-        const rows =
-            document.getElementById(
-                "signalRows"
-            );
-
-
-        if (!signals.length) {
-
-            rows.innerHTML = `
-                <tr>
-                    <td
-                        colspan="9"
-                        class="empty"
-                    >
-                        No signals yet
-                    </td>
-                </tr>
-            `;
-
-            return;
+        )
+
+    active_session, active_pairs = get_active_session_and_pairs()
+
+    with market_lock:
+        pair_data = {
+            pair: {
+                **latest_market[pair],
+                "is_active_pair": pair in active_pairs,
+            }
+            for pair in PAIRS
         }
 
+    range_label = "All Time" if days == 0 else f"Last {days} Day" + ("" if days == 1 else "s")
 
-        rows.innerHTML =
-            signals.map(
-                signal => {
+    return {
+        # Backward-compatible summary fields
+        "total": selected_stats["signals"],
+        "wins": selected_stats["wins"],
+        "losses": selected_stats["losses"],
+        "pending": selected_stats["pending"],
+        "draws": selected_stats["draws"],
+        "win_rate": selected_stats["win_rate"],
+        "signals": history,
 
-                    let resultClass =
-                        "pending";
-
-
-                    if (
-                        signal.result ===
-                        "WIN"
-                    ) {
-                        resultClass =
-                            "win";
-                    }
-
-
-                    if (
-                        signal.result ===
-                        "LOSS"
-                    ) {
-                        resultClass =
-                            "loss";
-                    }
-
-
-                    if (
-                        signal.result ===
-                        "DRAW"
-                    ) {
-                        resultClass =
-                            "draw";
-                    }
-
-
-                    const signalClass =
-                        signal.signal ===
-                        "CALL"
-                            ? "call"
-                            : "put";
-
-
-                    return `
-                    <tr>
-
-                        <td>
-                            ${signal.created_at}
-                        </td>
-
-                        <td>
-                            ${signal.pair}
-                        </td>
-
-                        <td>
-                            <span
-                                class="pill ${signalClass}"
-                            >
-                                ${signal.signal}
-                            </span>
-                        </td>
-
-                        <td>
-                            ${signal.confidence}%
-                        </td>
-
-                        <td>
-                            ${
-                                signal.entry_price
-                                    ? Number(
-                                        signal.entry_price
-                                      ).toFixed(5)
-                                    : "-"
-                            }
-                        </td>
-
-                        <td>
-                            ${
-                                signal.exit_price
-                                    ? Number(
-                                        signal.exit_price
-                                      ).toFixed(5)
-                                    : "-"
-                            }
-                        </td>
-
-                        <td>
-                            ${
-                                signal.rsi
-                                    ? Number(
-                                        signal.rsi
-                                      ).toFixed(1)
-                                    : "-"
-                            }
-                        </td>
-
-                        <td>
-                            ${signal.session}
-                        </td>
-
-                        <td>
-                            <span
-                                class="pill ${resultClass}"
-                            >
-                                ${signal.result}
-                            </span>
-                        </td>
-
-                    </tr>
-                    `;
-
-                }
-            ).join("");
-
+        # New multi-day dashboard data
+        "range": {
+            "days": days,
+            "label": range_label,
+        },
+        "stats": {
+            "signals": selected_stats["signals"],
+            "signals_today": selected_stats["signals"],
+            "wins": selected_stats["wins"],
+            "losses": selected_stats["losses"],
+            "pending": selected_stats["pending"],
+            "draws": selected_stats["draws"],
+            "win_rate": selected_stats["win_rate"],
+            "avg_score": selected_stats["avg_score"],
+            "completed": selected_stats["completed"],
+        },
+        "all_time": overall,
+        "session": active_session,
+        "active_pairs": active_pairs,
+        "pairs": pair_data,
+        "pair_stats": pair_stats,
+        "session_stats": session_stats,
+        "daily": daily,
+        "history": history,
     }
-
-    catch (error) {
-
-        console.error(
-            "Dashboard error:",
-            error
-        );
-
-    }
-
-}
-
-
-loadDashboard();
-
-
-setInterval(
-    loadDashboard,
-    15000
-);
-
-</script>
-
-</body>
-
-</html>
-"""
-
 
 # ============================================================
 # BACKGROUND BOT
 # ============================================================
 
+
 def scanner_loop():
-
     init_database()
-
-    print()
-    print(
-        "======================================"
-    )
-
-    print(
-        "AI FOREX SIGNAL BOT"
-    )
-
-    print(
-        "======================================"
-    )
-
-    print(
-        "Pairs: EUR/USD, GBP/USD"
-    )
-
-    print(
-        "Timeframe: 5 minutes"
-    )
-
-    print(
-        "Expiry: 2 minutes"
-    )
-
-    print(
-        f"Confidence: "
-        f"{CONFIDENCE_THRESHOLD}%"
-    )
-
-    print(
-        "Dashboard: /dashboard"
-    )
-    print(
-        "App: /app"
-    )
-
-    print(
-        "Timezone: Asia/Kolkata"
-    )
-
-    print(
-        "======================================"
-    )
+    print("======================================")
+    print("AI FOREX SIGNAL BOT V4")
+    print("======================================")
+    print("Pairs: session-based multi-pair scanning")
+    print("Timeframe: 5 minutes")
+    print("Expiry: 2 minutes")
+    print(f"Score threshold: {CONFIDENCE_THRESHOLD}%")
+    print("Candle patterns: REMOVED as a required filter")
+    print(f"Duplicate cooldown: {DUPLICATE_COOLDOWN_MINUTES} minutes")
+    print("App: /app")
+    print("Dashboard: /dashboard")
+    print("Timezone: Asia/Kolkata")
+    print("======================================")
 
     while True:
-
         try:
-
             run_scan()
+        except Exception as exc:
+            print(f"Scanner error: {exc}")
 
-        except Exception as e:
+        print(f"Next scan in {SCAN_INTERVAL // 60} minutes...")
+        time.sleep(SCAN_INTERVAL)
 
-            print(
-                f"Scanner error: {e}"
-            )
-
-        print(
-            f"Next scan in "
-            f"{SCAN_INTERVAL // 60} "
-            f"minutes..."
-        )
-
-        time.sleep(
-            SCAN_INTERVAL
-        )
-
-
-# ============================================================
-# START DATABASE
-# ============================================================
 
 init_database()
-
-
-# ============================================================
-# START BACKGROUND THREAD
-# ============================================================
-
-scanner_thread = threading.Thread(
-    target=scanner_loop,
-    daemon=True
-)
-
-scanner_thread.start()
+threading.Thread(target=scanner_loop, daemon=True).start()
