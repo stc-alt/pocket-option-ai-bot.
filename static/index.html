@@ -1,753 +1,141 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport"
-          content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-
-    <meta name="theme-color" content="#0b1020">
-    <meta name="description"
-          content="AI Forex Signal Bot dashboard">
-
-    <link rel="manifest" href="/manifest.json">
-
-    <title>AI Forex Bot</title>
-
-    <style>
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
-        body {
-            font-family: Arial, sans-serif;
-            background: #080c17;
-            color: #ffffff;
-            min-height: 100vh;
-        }
-
-        .app {
-            max-width: 1100px;
-            margin: auto;
-            padding: 20px;
-        }
-
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 25px;
-        }
-
-        .logo {
-            font-size: 24px;
-            font-weight: bold;
-        }
-
-        .status {
-            display: flex;
-            align-items: center;
-            gap: 7px;
-            background: #11182a;
-            padding: 8px 12px;
-            border-radius: 20px;
-            font-size: 13px;
-        }
-
-        .dot {
-            width: 9px;
-            height: 9px;
-            background: #22c55e;
-            border-radius: 50%;
-        }
-
-        .hero {
-            background: linear-gradient(135deg, #111a35, #151027);
-            border-radius: 20px;
-            padding: 24px;
-            margin-bottom: 20px;
-        }
-
-        .hero h1 {
-            font-size: 28px;
-            margin-bottom: 8px;
-        }
-
-        .hero p {
-            color: #9ca3af;
-        }
-
-        .session {
-            margin-top: 18px;
-            display: inline-block;
-            padding: 8px 14px;
-            background: #18223c;
-            border-radius: 20px;
-            color: #60a5fa;
-            font-size: 14px;
-        }
-
-        .cards {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 14px;
-            margin-bottom: 20px;
-        }
-
-        .card {
-            background: #111827;
-            border: 1px solid #1f2937;
-            border-radius: 16px;
-            padding: 18px;
-        }
-
-        .card-title {
-            color: #9ca3af;
-            font-size: 13px;
-            margin-bottom: 9px;
-        }
-
-        .card-value {
-            font-size: 27px;
-            font-weight: bold;
-        }
-
-        .green {
-            color: #22c55e;
-        }
-
-        .red {
-            color: #ef4444;
-        }
-
-        .yellow {
-            color: #facc15;
-        }
-
-        .blue {
-            color: #60a5fa;
-        }
-
-        .section {
-            background: #111827;
-            border: 1px solid #1f2937;
-            border-radius: 18px;
-            padding: 20px;
-            margin-bottom: 20px;
-        }
-
-        .section h2 {
-            margin-bottom: 15px;
-            font-size: 19px;
-        }
-
-        .pairs {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
-        }
-
-        .pair {
-            background: #0b1220;
-            border-radius: 15px;
-            padding: 18px;
-            border: 1px solid #1f2937;
-        }
-
-        .pair-top {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 15px;
-        }
-
-        .pair-name {
-            font-size: 18px;
-            font-weight: bold;
-        }
-
-        .pair-status {
-            color: #22c55e;
-            font-size: 12px;
-        }
-
-        .pair-data {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 12px;
-        }
-
-        .data-label {
-            color: #6b7280;
-            font-size: 12px;
-        }
-
-        .data-value {
-            margin-top: 4px;
-            font-size: 15px;
-        }
-
-        .signal-box {
-            margin-top: 15px;
-            padding: 13px;
-            border-radius: 12px;
-            background: #111827;
-            text-align: center;
-            font-weight: bold;
-        }
-
-        .no-signal {
-            color: #9ca3af;
-        }
-
-        .table-container {
-            overflow-x: auto;
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            min-width: 750px;
-        }
-
-        th,
-        td {
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid #1f2937;
-            font-size: 13px;
-        }
-
-        th {
-            color: #9ca3af;
-            font-weight: normal;
-        }
-
-        .badge {
-            display: inline-block;
-            padding: 5px 9px;
-            border-radius: 8px;
-            font-size: 11px;
-            font-weight: bold;
-        }
-
-        .call {
-            background: rgba(34, 197, 94, 0.15);
-            color: #22c55e;
-        }
-
-        .put {
-            background: rgba(239, 68, 68, 0.15);
-            color: #ef4444;
-        }
-
-        .pending {
-            background: rgba(250, 204, 21, 0.15);
-            color: #facc15;
-        }
-
-        .win {
-            background: rgba(34, 197, 94, 0.15);
-            color: #22c55e;
-        }
-
-        .loss {
-            background: rgba(239, 68, 68, 0.15);
-            color: #ef4444;
-        }
-
-        .draw {
-            background: rgba(156, 163, 175, 0.15);
-            color: #9ca3af;
-        }
-
-        .footer {
-            text-align: center;
-            color: #6b7280;
-            font-size: 12px;
-            padding: 15px;
-        }
-
-        .refresh {
-            color: #6b7280;
-            font-size: 12px;
-            margin-top: 8px;
-        }
-
-        @media (max-width: 800px) {
-            .cards {
-                grid-template-columns: repeat(2, 1fr);
-            }
-
-            .pairs {
-                grid-template-columns: 1fr;
-            }
-        }
-
-        @media (max-width: 480px) {
-            .app {
-                padding: 12px;
-            }
-
-            .hero h1 {
-                font-size: 23px;
-            }
-
-            .cards {
-                gap: 8px;
-            }
-
-            .card {
-                padding: 14px;
-            }
-
-            .card-value {
-                font-size: 22px;
-            }
-        }
-    </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b1020">
+<link rel="manifest" href="/manifest.json">
+<title>AI Forex Bot V4</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:Inter,Arial,sans-serif;background:#080c17;color:#eef2ff}main{max-width:1100px;margin:auto;padding:16px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:15px;flex-wrap:wrap}.title{font-size:25px;font-weight:850}.sub{font-size:12px;color:#8b95ad;margin-top:4px}.status{font-size:12px;padding:7px 10px;border-radius:999px;background:#10251b;color:#66e39a}.push{width:100%;padding:12px 14px;border:0;border-radius:12px;background:#2563eb;color:#fff;font-weight:700;margin-bottom:12px}.push:disabled{opacity:.65}.session{background:#111827;border:1px solid #202a3d;border-radius:14px;padding:13px;margin-bottom:13px}.range{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:15px}.range button{border:1px solid #29364d;background:#0e1625;color:#c8d2e7;border-radius:9px;padding:8px 12px;cursor:pointer}.range button.active{background:#2563eb;border-color:#2563eb;color:#fff}.grid{display:grid;grid-template-columns:repeat(5,1fr);gap:9px;margin-bottom:16px}.card{background:#101625;border:1px solid #202a3d;border-radius:14px;padding:13px}.label{font-size:11px;color:#8b95ad}.value{font-size:21px;font-weight:800;margin-top:6px}.small{font-size:11px;color:#8b95ad;margin-top:4px}.pairs{display:grid;grid-template-columns:repeat(2,1fr);gap:11px;margin-bottom:18px}.pair{background:#101625;border:1px solid #202a3d;border-radius:15px;padding:14px}.pair.active{box-shadow:0 0 0 1px #35588e inset}.pair h3{margin:0 0 10px;font-size:16px}.pair-head{display:flex;justify-content:space-between;gap:8px;align-items:center}.badge{font-size:10px;padding:5px 7px;border-radius:999px;background:#1b2537;color:#9da9bf}.metrics{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}.signal{margin-top:11px;padding:10px;border-radius:10px;background:#182033;font-weight:800;text-align:center}.call{color:#4ade80}.put{color:#fb7185}.muted{color:#8b95ad}.section-title{margin:17px 0 10px}.mini-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:11px}.table-wrap{overflow:auto;background:#101625;border:1px solid #202a3d;border-radius:14px}.table{width:100%;border-collapse:collapse;min-width:760px}.table th,.table td{text-align:left;padding:10px;border-bottom:1px solid #202a3d;font-size:12px;white-space:nowrap}.table th{color:#8b95ad}.empty{padding:25px;text-align:center;color:#8b95ad}.bar{height:7px;border-radius:999px;background:#1b2537;overflow:hidden}.bar > span{display:block;height:100%;background:#4ade80}.error{color:#fb7185}
+@media(max-width:800px){.grid{grid-template-columns:repeat(2,1fr)}.pairs{grid-template-columns:1fr}.mini-grid{grid-template-columns:1fr}}
+</style>
 </head>
-
 <body>
+<main>
+  <div class="top">
+    <div><div class="title">🤖 AI Forex Bot V4</div><div class="sub">Indicator-based • 5 min candles • 2 min expiry • no candle-pattern gate</div></div>
+    <div class="status">● Online</div>
+  </div>
 
-<div class="app">
+  <button id="pushBtn" class="push">🔔 Enable phone notifications</button>
+  <div id="pushStatus" class="sub" style="margin:-6px 0 12px 2px"></div>
 
-    <header>
-        <div class="logo">🤖 AI Forex Bot</div>
+  <div id="session" class="session">Loading session...</div>
 
-        <div class="status">
-            <span class="dot"></span>
-            <span id="botStatus">Checking...</span>
-        </div>
-    </header>
+  <div class="range">
+    <button data-days="1">1D</button>
+    <button data-days="7" class="active">7D</button>
+    <button data-days="30">30D</button>
+    <button data-days="90">90D</button>
+    <button data-days="0">ALL</button>
+  </div>
 
-    <div class="hero">
+  <div class="grid">
+    <div class="card"><div class="label">Signals</div><div id="signals" class="value">—</div><div id="rangeLabel" class="small">Selected range</div></div>
+    <div class="card"><div class="label">Wins</div><div id="wins" class="value">—</div></div>
+    <div class="card"><div class="label">Losses</div><div id="losses" class="value">—</div></div>
+    <div class="card"><div class="label">Pending</div><div id="pending" class="value">—</div></div>
+    <div class="card"><div class="label">Win Rate</div><div id="winrate" class="value">—</div><div id="completed" class="small">Completed: —</div></div>
+  </div>
 
-        <h1>Trading Dashboard</h1>
+  <div class="card" style="margin-bottom:15px"><div class="label">Average setup score</div><div id="avgscore" class="value">—</div><div class="small">Score is setup strength, not a guaranteed win probability.</div></div>
 
-        <p>
-            Automated 5-minute forex signal system
-        </p>
+  <h3 class="section-title">Markets</h3>
+  <div id="pairs" class="pairs"></div>
 
-        <div class="session">
-            Session:
-            <strong id="session">Checking...</strong>
-        </div>
+  <h3 class="section-title">Performance by Pair</h3>
+  <div id="pairStats" class="mini-grid"></div>
 
-        <div class="refresh">
-            Last update:
-            <span id="lastUpdate">--</span>
-        </div>
+  <h3 class="section-title">Performance by Session</h3>
+  <div id="sessionStats" class="mini-grid"></div>
 
-    </div>
+  <h3 class="section-title">Daily Performance</h3>
+  <div class="table-wrap"><table class="table"><thead><tr><th>Date</th><th>Signals</th><th>Wins</th><th>Losses</th><th>Pending</th><th>Win Rate</th><th>Avg Score</th></tr></thead><tbody id="daily"></tbody></table><div id="dailyEmpty" class="empty" style="display:none">No completed records in this range.</div></div>
 
-    <!-- STATISTICS -->
-
-    <div class="cards">
-
-        <div class="card">
-            <div class="card-title">Signals Today</div>
-            <div class="card-value blue" id="signalsToday">0</div>
-        </div>
-
-        <div class="card">
-            <div class="card-title">Wins</div>
-            <div class="card-value green" id="wins">0</div>
-        </div>
-
-        <div class="card">
-            <div class="card-title">Losses</div>
-            <div class="card-value red" id="losses">0</div>
-        </div>
-
-        <div class="card">
-            <div class="card-title">Win Rate</div>
-            <div class="card-value yellow" id="winRate">0%</div>
-        </div>
-
-    </div>
-
-    <!-- BOT -->
-
-    <div class="section">
-
-        <h2>📡 Bot Status</h2>
-
-        <div class="pairs">
-
-            <div class="pair">
-
-                <div class="pair-top">
-                    <div class="pair-name">EUR/USD</div>
-                    <div class="pair-status">● ACTIVE</div>
-                </div>
-
-                <div class="pair-data">
-
-                    <div>
-                        <div class="data-label">Price</div>
-                        <div class="data-value" id="eurPrice">--</div>
-                    </div>
-
-                    <div>
-                        <div class="data-label">RSI</div>
-                        <div class="data-value" id="eurRsi">--</div>
-                    </div>
-
-                </div>
-
-                <div class="signal-box no-signal" id="eurSignal">
-                    No current signal
-                </div>
-
-            </div>
-
-
-            <div class="pair">
-
-                <div class="pair-top">
-                    <div class="pair-name">GBP/USD</div>
-                    <div class="pair-status">● ACTIVE</div>
-                </div>
-
-                <div class="pair-data">
-
-                    <div>
-                        <div class="data-label">Price</div>
-                        <div class="data-value" id="gbpPrice">--</div>
-                    </div>
-
-                    <div>
-                        <div class="data-label">RSI</div>
-                        <div class="data-value" id="gbpRsi">--</div>
-                    </div>
-
-                </div>
-
-                <div class="signal-box no-signal" id="gbpSignal">
-                    No current signal
-                </div>
-
-            </div>
-
-        </div>
-
-    </div>
-
-
-    <!-- SIGNAL HISTORY -->
-
-    <div class="section">
-
-        <h2>📊 Signal History</h2>
-
-        <div class="table-container">
-
-            <table>
-
-                <thead>
-
-                    <tr>
-                        <th>Time</th>
-                        <th>Pair</th>
-                        <th>Signal</th>
-                        <th>Confidence</th>
-                        <th>Entry</th>
-                        <th>Result</th>
-                        <th>Session</th>
-                    </tr>
-
-                </thead>
-
-                <tbody id="history">
-
-                    <tr>
-                        <td colspan="7"
-                            style="text-align:center;color:#6b7280;">
-                            Loading...
-                        </td>
-                    </tr>
-
-                </tbody>
-
-            </table>
-
-        </div>
-
-    </div>
-
-
-    <div class="footer">
-        AI Forex Signal Bot • EUR/USD • GBP/USD • 5M
-    </div>
-
-</div>
-
-
+  <h3 class="section-title">Trade History</h3>
+  <div class="table-wrap"><table class="table"><thead><tr><th>Time</th><th>Pair</th><th>Signal</th><th>Score</th><th>Entry</th><th>Exit</th><th>RSI</th><th>Result</th><th>Session</th></tr></thead><tbody id="history"></tbody></table><div id="historyEmpty" class="empty" style="display:none">No trades in this range.</div></div>
+</main>
 <script>
-
-async function loadDashboard() {
-
-    try {
-
-        const response =
-            await fetch("/api/dashboard");
-
-        if (!response.ok) {
-            throw new Error("API error");
-        }
-
-        const data =
-            await response.json();
-
-        updateDashboard(data);
-
-    } catch (error) {
-
-        document.getElementById("botStatus")
-            .textContent = "Offline";
-
-        console.error(error);
-
-    }
-
+let selectedDays=7;
+const pairsOrder=['EUR/USD','GBP/USD','USD/JPY','AUD/JPY','AUD/USD','NZD/USD','USD/CAD'];
+const sessionOrder=['Sydney','Tokyo','London','London / New York','New York'];
+function el(id){return document.getElementById(id)}
+function set(id,v){el(id).textContent=v==null?'—':v}
+function fmt(v){return v==null?'—':Number(v).toFixed(5)}
+function pct(v){return v==null?'—':Number(v).toFixed(1)+'%'}
+function clsSignal(v){return v==='CALL'?'call':v==='PUT'?'put':''}
+function cardStats(stats){
+  const rate=pct(stats.win_rate||0);
+  return `<div class="card"><div style="display:flex;justify-content:space-between;gap:8px"><strong>${stats.name||''}</strong><span class="badge">${stats.signals||0} trades</span></div><div class="small">W ${stats.wins||0} • L ${stats.losses||0} • P ${stats.pending||0}</div><div style="margin-top:9px" class="bar"><span style="width:${Math.max(0,Math.min(100,stats.win_rate||0))}%"></span></div><div class="small">Win rate ${rate} • Avg score ${stats.avg_score||0}</div></div>`
+}
+function renderPairs(d){
+  let html='';
+  for(const p of pairsOrder){
+    const x=d.pairs?.[p]||{};
+    const active=x.is_active_pair;
+    const sig=x.signal?`<div class="signal ${clsSignal(x.signal)}">${x.signal} • ${x.score??x.confidence??'—'}%</div>`:`<div class="signal muted">No current signal</div>`;
+    html+=`<div class="pair ${active?'active':''}"><div class="pair-head"><h3>${p}</h3><span class="badge">${active?'ACTIVE SESSION':'WAITING'}</span></div><div class="metrics"><div><div class="label">Price</div><div class="value">${fmt(x.price)}</div></div><div><div class="label">RSI</div><div class="value">${x.rsi==null?'—':Number(x.rsi).toFixed(1)}</div></div><div><div class="label">Last scan</div><div class="small">${x.updated_at||'—'}</div></div></div>${sig}</div>`;
+  }
+  el('pairs').innerHTML=html;
+}
+function renderBreakdowns(d){
+  let pairHtml='';
+  for(const p of pairsOrder){pairHtml+=cardStats({name:p,...(d.pair_stats?.[p]||{})})}
+  el('pairStats').innerHTML=pairHtml;
+  let sessHtml='';
+  for(const s of sessionOrder){sessHtml+=cardStats({name:s,...(d.session_stats?.[s]||{})})}
+  el('sessionStats').innerHTML=sessHtml;
+}
+function renderDaily(d){
+  const rows=d.daily||[]; const body=el('daily'); body.innerHTML=''; el('dailyEmpty').style.display=rows.length?'none':'block';
+  for(const x of rows){
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${x.date}</td><td>${x.signals}</td><td class="call">${x.wins}</td><td class="put">${x.losses}</td><td>${x.pending}</td><td>${pct(x.win_rate)}</td><td>${x.avg_score}%</td>`;
+    body.appendChild(tr);
+  }
+}
+function renderHistory(d){
+  const rows=d.history||[]; const body=el('history'); body.innerHTML=''; el('historyEmpty').style.display=rows.length?'none':'block';
+  for(const x of rows){
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${x.time}</td><td>${x.pair}</td><td class="${clsSignal(x.signal)}">${x.signal}</td><td>${x.confidence}%</td><td>${fmt(x.entry_price)}</td><td>${fmt(x.exit_price)}</td><td>${x.rsi==null?'—':Number(x.rsi).toFixed(1)}</td><td>${x.result}</td><td>${x.session}</td>`;
+    body.appendChild(tr);
+  }
+}
+async function load(){
+  try{
+    const r=await fetch(`/api/dashboard?days=${selectedDays}`,{cache:'no-store'});
+    const d=await r.json();
+    set('session',d.session==='Outside Session'?'⏸ Outside trading session':`📡 Active: ${d.session} • ${d.active_pairs?.join(' • ')||''}`);
+    set('rangeLabel',d.range?.label||'Selected range');
+    set('signals',d.stats?.signals||0);set('wins',d.stats?.wins||0);set('losses',d.stats?.losses||0);set('pending',d.stats?.pending||0);set('winrate',pct(d.stats?.win_rate));set('completed',`Completed: ${d.stats?.completed||0}`);set('avgscore',`${d.stats?.avg_score||0}%`);
+    renderPairs(d);renderBreakdowns(d);renderDaily(d);renderHistory(d);
+  }catch(e){set('session','Dashboard connection error');el('session').className='session error'}
 }
 
+document.querySelectorAll('.range button').forEach(b=>b.addEventListener('click',()=>{selectedDays=Number(b.dataset.days);document.querySelectorAll('.range button').forEach(x=>x.classList.remove('active'));b.classList.add('active');load()}));
 
-function updateDashboard(data) {
-
-    document.getElementById("botStatus")
-        .textContent = "Online";
-
-    document.getElementById("lastUpdate")
-        .textContent =
-        new Date().toLocaleTimeString();
-
-
-    if (data.stats) {
-
-        document.getElementById("signalsToday")
-            .textContent =
-            data.stats.signals_today ?? 0;
-
-        document.getElementById("wins")
-            .textContent =
-            data.stats.wins ?? 0;
-
-        document.getElementById("losses")
-            .textContent =
-            data.stats.losses ?? 0;
-
-        document.getElementById("winRate")
-            .textContent =
-            (data.stats.win_rate ?? 0) + "%";
-
-    }
-
-
-    if (data.session) {
-
-        document.getElementById("session")
-            .textContent =
-            data.session;
-
-    }
-
-
-    updatePair(
-        "EUR/USD",
-        data,
-        "eurPrice",
-        "eurRsi",
-        "eurSignal"
-    );
-
-    updatePair(
-        "GBP/USD",
-        data,
-        "gbpPrice",
-        "gbpRsi",
-        "gbpSignal"
-    );
-
-
-    if (data.history) {
-
-        const history =
-            document.getElementById("history");
-
-        history.innerHTML = "";
-
-        if (data.history.length === 0) {
-
-            history.innerHTML = `
-                <tr>
-                    <td colspan="7"
-                        style="text-align:center;color:#6b7280;">
-                        No signals yet
-                    </td>
-                </tr>
-            `;
-
-            return;
-        }
-
-
-        data.history.forEach(signal => {
-
-            const row =
-                document.createElement("tr");
-
-            let signalClass =
-                signal.signal === "CALL"
-                    ? "call"
-                    : "put";
-
-            let resultClass = "";
-
-            if (signal.result === "WIN")
-                resultClass = "win";
-
-            else if (signal.result === "LOSS")
-                resultClass = "loss";
-
-            else
-                resultClass = "pending";
-
-
-            row.innerHTML = `
-
-                <td>${signal.time ?? "--"}</td>
-
-                <td>${signal.pair ?? "--"}</td>
-
-                <td>
-                    <span class="badge ${signalClass}">
-                        ${signal.signal ?? "--"}
-                    </span>
-                </td>
-
-                <td>
-                    ${signal.confidence ?? "--"}%
-                </td>
-
-                <td>
-                    ${signal.entry_price ?? "--"}
-                </td>
-
-                <td>
-                    <span class="badge ${resultClass}">
-                        ${signal.result ?? "PENDING"}
-                    </span>
-                </td>
-
-                <td>
-                    ${signal.session ?? "--"}
-                </td>
-
-            `;
-
-            history.appendChild(row);
-
-        });
-
-    }
-
+function urlBase64ToUint8Array(base64String){const padding='='.repeat((4-base64String.length%4)%4);const base64=(base64String+padding).replace(/-/g,'+').replace(/_/g,'/');const raw=atob(base64);return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)))}
+async function enablePush(){
+  const btn=el('pushBtn'),status=el('pushStatus');
+  if(!('serviceWorker'in navigator)||!('PushManager'in window)||!('Notification'in window)){status.textContent='Push notifications are not supported by this browser.';return}
+  btn.disabled=true;
+  try{
+    const permission=await Notification.requestPermission();
+    if(permission!=='granted'){status.textContent='Notification permission was not granted.';btn.disabled=false;return}
+    const reg=await navigator.serviceWorker.ready;
+    const keyRes=await fetch('/api/push/public-key');const keyData=await keyRes.json();
+    if(!keyData.public_key)throw new Error('Push is not configured on the server yet.');
+    let sub=await reg.pushManager.getSubscription();
+    if(!sub){sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:urlBase64ToUint8Array(keyData.public_key)})}
+    await fetch('/api/push/subscribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sub.toJSON())});
+    status.textContent='✅ Phone notifications are enabled.';btn.textContent='🔔 Notifications enabled';
+  }catch(e){status.textContent='Could not enable notifications: '+e.message;btn.disabled=false}
 }
-
-
-function updatePair(
-    pair,
-    data,
-    priceId,
-    rsiId,
-    signalId
-) {
-
-    let info = null;
-
-    if (data.pairs) {
-
-        info = data.pairs[pair];
-
-    }
-
-    if (!info) return;
-
-
-    document.getElementById(priceId)
-        .textContent =
-        info.price ?? "--";
-
-    document.getElementById(rsiId)
-        .textContent =
-        info.rsi ?? "--";
-
-
-    const box =
-        document.getElementById(signalId);
-
-
-    if (info.signal) {
-
-        box.textContent =
-            info.signal +
-            " • " +
-            (info.confidence ?? "--") +
-            "%";
-
-        box.className =
-            "signal-box " +
-            (
-                info.signal === "CALL"
-                    ? "green"
-                    : "red"
-            );
-
-    } else {
-
-        box.textContent =
-            "No current signal";
-
-        box.className =
-            "signal-box no-signal";
-
-    }
-
-}
-
-
-loadDashboard();
-
-setInterval(
-    loadDashboard,
-    15000
-);
-
-
-/* Register PWA service worker */
-
-if ("serviceWorker" in navigator) {
-
-    window.addEventListener(
-        "load",
-        () => {
-
-            navigator.serviceWorker
-                .register("/sw.js")
-                .catch(error =>
-                    console.log(
-                        "Service worker error:",
-                        error
-                    )
-                );
-
-        }
-    );
-
-}
-
+el('pushBtn').addEventListener('click',enablePush);
+if('serviceWorker'in navigator){navigator.serviceWorker.register('/sw.js').catch(console.error)}
+load();setInterval(load,30000);
 </script>
-
 </body>
 </html>
