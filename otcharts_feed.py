@@ -123,6 +123,7 @@ class OTCStreamClient:
                 if response.status_code == 429:
                     raise OTChartsError("OTCharts rate limit reached (HTTP 429).")
                 response.raise_for_status()
+                response.encoding = "utf-8"
                 with self._lock:
                     self._status = "connected"
                 backoff = 2
