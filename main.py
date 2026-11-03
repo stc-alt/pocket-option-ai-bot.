@@ -33,13 +33,13 @@ IST = pytz.timezone("Asia/Kolkata")
 # All pairs used by the session selector. The scanner only scans
 # two pairs at a time to keep Twelve Data usage controlled.
 PAIRS = {
-    "EUR/USD": "5min",
-    "GBP/USD": "5min",
-    "USD/JPY": "5min",
-    "AUD/JPY": "5min",
-    "AUD/USD": "5min",
-    "NZD/USD": "5min",
-    "USD/CAD": "5min",
+    "EUR/USD": "2min",
+    "GBP/USD": "2min",
+    "USD/JPY": "2min",
+    "AUD/JPY": "2min",
+    "AUD/USD": "2min",
+    "NZD/USD": "2min",
+    "USD/CAD": "2min",
 }
 
 SESSION_PAIRS = {
@@ -51,7 +51,7 @@ SESSION_PAIRS = {
 }
 
 CONFIDENCE_THRESHOLD = 70
-EXPIRY_MINUTES = 2
+EXPIRY_MINUTES = 5
 SCAN_INTERVAL = 300  # 5 minutes
 USE_TRADING_HOURS = True
 DUPLICATE_COOLDOWN_MINUTES = 20
@@ -199,10 +199,15 @@ def get_market_data(symbol, interval):
         return None
 
     url = "https://api.twelvedata.com/time_series"
+    # Twelve Data has no native 2-minute interval. Build complete
+    # 2-minute candles from two 1-minute OHLC candles instead.
+    source_interval = "1min" if interval == "2min" else interval
+    outputsize = 140 if interval == "2min" else 100
+
     params = {
         "symbol": symbol,
-        "interval": interval,
-        "outputsize": 100,
+        "interval": source_interval,
+        "outputsize": outputsize,
         "apikey": TWELVE_DATA_API_KEY,
     }
 
@@ -221,6 +226,38 @@ def get_market_data(symbol, interval):
 
         df = df.dropna(subset=["open", "high", "low", "close"])
         df = df.iloc[::-1].reset_index(drop=True)
+
+        if interval == "2min":
+            if "datetime" not in df.columns:
+                print(f"Twelve Data response for {symbol} has no datetime column.")
+                return None
+
+            df["datetime"] = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+            df = df.dropna(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
+
+            # Exclude the still-forming 2-minute candle.
+            now_utc = pd.Timestamp.now(tz="UTC")
+            current_bucket = now_utc.floor("2min")
+            df["bucket"] = df["datetime"].dt.floor("2min")
+            df = df[df["bucket"] < current_bucket]
+
+            # Only retain complete buckets containing both 1-minute candles.
+            grouped = (
+                df.groupby("bucket", sort=True)
+                .agg(
+                    open=("open", "first"),
+                    high=("high", "max"),
+                    low=("low", "min"),
+                    close=("close", "last"),
+                    minute_count=("datetime", "count"),
+                )
+                .reset_index()
+            )
+            grouped = grouped[grouped["minute_count"] == 2].copy()
+            grouped = grouped.rename(columns={"bucket": "datetime"})
+            grouped = grouped.drop(columns=["minute_count"])
+            df = grouped.reset_index(drop=True)
+
         return df
 
     except requests.RequestException as exc:
@@ -846,7 +883,7 @@ def home():
     </head>
     <body>
       <h1>AI Forex Signal Bot</h1>
-      <p>V4 Balanced Quality • 5-minute candles • 2-minute expiry</p>
+      <p>V4 Balanced Quality • 2-minute candles • 5-minute expiry</p>
       <a href='/app'>Open App</a>
       <a href='/dashboard'>Open Dashboard</a>
     </body>
@@ -1032,8 +1069,8 @@ def scanner_loop():
     print("AI FOREX SIGNAL BOT V4")
     print("======================================")
     print("Pairs: session-based multi-pair scanning")
-    print("Timeframe: 5 minutes")
-    print("Expiry: 2 minutes")
+    print("Timeframe: 2 minutes (aggregated from 1-minute data)")
+    print(f"Expiry: {EXPIRY_MINUTES} minutes")
     print(f"Score threshold: {CONFIDENCE_THRESHOLD}%")
     print("Candle patterns: REMOVED as a required filter")
     print(f"Duplicate cooldown: {DUPLICATE_COOLDOWN_MINUTES} minutes")
